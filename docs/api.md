@@ -49,6 +49,8 @@ Declare a questions collection with `--collections-json '{"needsYou":{"type":"qu
 
 The shell refuses framing. Its sandboxed iframe retains a separate dashboard origin and cannot navigate the shell. The shell accepts location and link messages only from its own iframe window and exact origin. External HTTP/HTTPS links open a tab; thread links are relayed at top level with an Open thread fallback button. Intra-dashboard links stay in the frame.
 
+An existing server that was stopped when its frame first opened may need a browser reload after it starts. Reachability probes update its status; they do not automatically reload an unchanged frame.
+
 ## Dashboard routes
 
 The validated Host chooses the dashboard. No query parameter selects another dashboard and no dashboard route serves the control API. Read routes set no CORS permissions.
