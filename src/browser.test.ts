@@ -63,3 +63,81 @@ describe("page subscription", () => {
     unsubscribe();
   });
 });
+
+describe("page metadata recovery", () => {
+  it("recovers from an initial metadata outage and preserves external-link navigation", async () => {
+    const events: Record<string, (event: unknown) => void> = {};
+    const timers: (() => void)[] = [];
+    const messages: { message: { type: string; url: string }; origin: string }[] = [];
+    const view: Record<string, unknown> = {};
+    const parent = {
+      postMessage: (message: { type: string; url: string }, origin: string) =>
+        messages.push({ message, origin }),
+    };
+    const location = {
+      href: "http://example--workstation.hub.localhost/",
+      search: "",
+      pathname: "/",
+      hash: "",
+    };
+    let requests = 0;
+    runInNewContext(await readFile(new URL("../web/dopamine.js", import.meta.url), "utf8"), {
+      window: view,
+      parent,
+      location,
+      URL,
+      URLSearchParams,
+      history: { pushState() {}, replaceState() {} },
+      addEventListener() {},
+      document: {
+        addEventListener: (name: string, callback: (event: unknown) => void) => {
+          events[name] = callback;
+        },
+      },
+      setTimeout(callback: () => void) {
+        timers.push(callback);
+      },
+      clearTimeout() {},
+      async fetch() {
+        requests++;
+        return requests === 1
+          ? { ok: false, status: 503 }
+          : {
+              ok: true,
+              json: async () => ({ shell: "http://hub.localhost/d/example--workstation" }),
+            };
+      },
+    });
+    await setImmediate();
+    location.href = "http://example--workstation.hub.localhost/details.html?tab=two#details";
+    const anchor = {
+      href: "t3-thread://v1/environment/thread",
+      target: "",
+      hasAttribute: () => false,
+    };
+    let prevented = false;
+    const click = {
+      button: 0,
+      target: { closest: () => anchor },
+      preventDefault: () => {
+        prevented = true;
+      },
+    };
+    events.click!(click);
+    expect(prevented).toBe(false);
+    expect(anchor.target).toBe("_blank");
+    await setImmediate();
+    timers.shift()!();
+    expect(requests).toBe(2);
+    expect(messages).toContainEqual({
+      message: { type: "dopamine:location", url: location.href },
+      origin: "http://hub.localhost",
+    });
+    events.click!(click);
+    expect(prevented).toBe(true);
+    expect(messages.at(-1)).toEqual({
+      message: { type: "dopamine:open", url: anchor.href },
+      origin: "http://hub.localhost",
+    });
+  });
+});
