@@ -402,6 +402,11 @@ describe("DashboardStore", () => {
     });
     expect((await store.readPage("example", "new.js")).toString()).toBe("new script");
     expect((await stat(join(await pageDirectory(), "new.js"))).mode & 0o777).toBe(0o600);
+    await store.publish("example", { "index.html": encoded("latest") });
+    expect(await readdir(join(root, "example", ".pages"))).toEqual([
+      (await pageDirectory()).split("/").at(-1),
+    ]);
+    expect((await store.readPage("example", "")).toString()).toBe("latest");
   });
 
   it("rejects traversal, invalid bodies and page publication on URL dashboards", async () => {

@@ -478,6 +478,16 @@ export class DashboardStore {
       } finally {
         if (!published) await rm(stage, { recursive: true, force: true });
       }
+      for (const entry of await readdir(generations, { withFileTypes: true })) {
+        if (
+          entry.name !== generation &&
+          entry.isDirectory() &&
+          /^[a-f0-9-]{36}$/.test(entry.name)
+        ) {
+          await rm(join(generations, entry.name), { recursive: true, force: true });
+        }
+      }
+      await syncDirectory(generations);
       return await this.readRecord(id);
     });
   }
