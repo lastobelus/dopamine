@@ -222,6 +222,48 @@ describe("completed current-head review", () => {
     expect(evaluateReview(head, [summary({ status: "running" })], [], inline, 0).status).toBe(
       "pending",
     );
+    const receipt: Comment = {
+      id: 2,
+      user: bot,
+      created_at: "2026-01-02T00:00:00Z",
+      body: `<!-- codex-review-receipt:v1 -->\n\nCodex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${head.slice(0, 10)}\``,
+    };
+    const historical = summary({ has_any_findings: true });
+    expect(evaluateReview(head, [historical, receipt], [], inline, 0).status).toBe("ready");
+    expect(evaluateReview(head, [historical, receipt], [], inline, 1).reason).toBe(
+      "review-unresolved",
+    );
+    for (const state of [
+      { status: "running" },
+      { has_unresolved_findings: true },
+      { has_any_findings: null },
+    ])
+      expect(evaluateReview(head, [summary(state), receipt], [], inline, 0).status).not.toBe(
+        "ready",
+      );
+    for (const invalid of [
+      { ...receipt, user: { login: "someone" } },
+      { ...receipt, body: receipt.body.replace(head.slice(0, 10), base.slice(0, 10)) },
+    ])
+      expect(evaluateReview(head, [historical, invalid], [], inline, 0).status).toBe("attention");
+    expect(
+      evaluateReview(
+        head,
+        [
+          historical,
+          receipt,
+          {
+            id: 3,
+            created_at: "2026-01-03T00:00:00Z",
+            author_association: "OWNER",
+            body: `@codex review\n<!-- lastcode-review-head: ${head} -->`,
+          },
+        ],
+        [],
+        inline,
+        0,
+      ).status,
+    ).toBe("pending");
   });
   it("does not let formal approval bypass missing or finding-bearing structured review", () => {
     const approval = {

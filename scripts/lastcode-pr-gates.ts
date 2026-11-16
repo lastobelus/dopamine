@@ -75,6 +75,28 @@ export function evaluateReview(
       `${unresolved} review threads remain unresolved.`,
     );
 
+  const triggers = comments.filter((comment) => {
+    if (!["OWNER", "MEMBER", "COLLABORATOR"].includes(comment.author_association ?? ""))
+      return false;
+    if (!/^@codex review\b/iu.test(comment.body.trim())) return false;
+    const requestedHead = /<!-- lastcode-review-head: ([0-9a-f]{40}) -->/u.exec(comment.body)?.[1];
+    return requestedHead === undefined || requestedHead === head;
+  });
+
+  const latestRequestedAt = Math.max(
+    0,
+    ...triggers.map((comment) => timestamp(comment.created_at)),
+  );
+  const cleanReceipt = comments.some((comment) => {
+    if (comment.user?.login !== bot || timestamp(comment.created_at) < latestRequestedAt)
+      return false;
+    const match =
+      /^<!-- codex-review-receipt:v1 -->\r?\n+Codex Review: Didn['’]t find any major issues\.[\s\S]*?\*\*Reviewed commit:\*\*\s*`([a-f0-9]{7,40})`/u.exec(
+        comment.body,
+      );
+    return match !== null && head.startsWith(match[1]!);
+  });
+
   const artifacts: { at: number; id: number; verdict: Decision }[] = [];
   for (const comment of comments) {
     if (comment.user?.login !== bot) continue;
@@ -94,7 +116,11 @@ export function evaluateReview(
             "review-pending",
             "Current-head Codex Review has not completed.",
           );
-        } else if (state.has_any_findings === false && state.has_unresolved_findings === false) {
+        } else if (
+          typeof state.has_any_findings === "boolean" &&
+          state.has_unresolved_findings === false &&
+          (state.has_any_findings === false || cleanReceipt)
+        ) {
           verdict = decision(
             "ready",
             "review-clean",
@@ -151,13 +177,7 @@ export function evaluateReview(
   }
   artifacts.sort((a, b) => a.at - b.at || a.id - b.id);
   const latest = artifacts.at(-1);
-  const triggers = comments.filter((comment) => {
-    if (!["OWNER", "MEMBER", "COLLABORATOR"].includes(comment.author_association ?? ""))
-      return false;
-    if (!/^@codex review\b/iu.test(comment.body.trim())) return false;
-    const requestedHead = /<!-- lastcode-review-head: ([0-9a-f]{40}) -->/u.exec(comment.body)?.[1];
-    return requestedHead === undefined || requestedHead === head;
-  });
+
   if (triggers.some((trigger) => !latest || timestamp(trigger.created_at) >= latest.at)) {
     return decision(
       "pending",
