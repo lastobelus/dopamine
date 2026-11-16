@@ -1,8 +1,6 @@
 const frame = document.querySelector("#dashboard");
 const key = decodeURIComponent(location.pathname.slice(3));
-let dashboard,
-  frameOrigin,
-  loaded = false;
+let dashboard, frameOrigin, framing;
 function frameAddress() {
   const base = dashboard.manifest.kind === "url" ? dashboard.manifest.url : dashboard.origin;
   const url = new URL(base);
@@ -38,17 +36,15 @@ async function refresh() {
     document.querySelector("#status").textContent =
       `updated ${minutes} min ago · ${dashboard.status}${dashboard.handlerState === "archived" ? " · handler thread archived" : ""}${dashboard.ownerState === "archived" ? " · thread archived" : ""}`;
     document.querySelector("#error").hidden = true;
-    if (!loaded) {
+    if (framing !== dashboard.frameAllowed) {
       const url = frameAddress();
       frameOrigin = url.origin;
+      frame.hidden = !dashboard.frameAllowed;
+      document.querySelector("#blocked").hidden = dashboard.frameAllowed;
       if (dashboard.frameAllowed) {
         frame.src = url.href;
-        frame.hidden = false;
-        loaded = true;
-      } else {
-        document.querySelector("#blocked").hidden = false;
-        loaded = true;
       }
+      framing = dashboard.frameAllowed;
     }
     updateDirect();
   } catch (error) {
