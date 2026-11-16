@@ -1,0 +1,10 @@
+engineStrict: true
+verifyDepsBeforeRun: false
+
+overrides:
+  oxlint: 1.89.0
+
+strictPeerDependencies: true
+peerDependencyRules:
+  allowedVersions:
+    vite: 1.4.0

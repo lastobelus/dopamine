@@ -1,0 +1,26 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "defaultThreadEnvMode": "worktree",
+  "scripts": [
+    {
+      "id": "setup-worktree",
+      "name": "Setup Worktree",
+      "command": "node scripts/setup-worktree.ts",
+      "icon": "configure",
+      "runOnWorktreeCreate": true,
+      "async": false
+    },
+    {
+      "id": "lc-check",
+      "name": "Run CI",
+      "command": "pnpm run ci",
+      "icon": "test"
+    },
+    {
+      "id": "lc-wait-for-pr",
+      "name": "Wait for PR",
+      "command": "node scripts/lastcode-wait-for-pr.ts",
+      "icon": "test"
+    }
+  ]
+}

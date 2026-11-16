@@ -1,0 +1,20 @@
+version = 1
+name = "dopamine"
+
+[setup]
+script = "node scripts/setup-worktree.ts"
+
+[[actions]]
+name = "Run CI"
+icon = "tool"
+command = "pnpm run ci"
+
+[[actions]]
+name = "Test"
+icon = "tool"
+command = "pnpm test"
+
+[[actions]]
+name = "Typecheck"
+icon = "tool"
+command = "pnpm typecheck"
