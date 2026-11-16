@@ -11,7 +11,7 @@ function frameAddress() {
   params.delete("dopamine-confirm");
   if (path && path.startsWith("/") && !path.startsWith("//") && !path.includes("\\"))
     url.pathname = path;
-  if (params.size) url.search = params.toString();
+  if (path !== null || params.size) url.search = params.toString();
   if (location.hash || path !== null) url.hash = location.hash;
   return url;
 }
@@ -72,13 +72,7 @@ addEventListener("message", (event) => {
       const params = new URLSearchParams(address.search);
       params.delete("dopamine-direct");
       params.delete("dopamine-confirm");
-      if (
-        address.pathname !== "/" ||
-        (dashboard.manifest.kind === "url" &&
-          new URL(dashboard.manifest.url).hash !== "" &&
-          address.hash === "")
-      )
-        params.set("dopamine-path", address.pathname);
+      params.set("dopamine-path", address.pathname);
       history.replaceState(
         null,
         "",

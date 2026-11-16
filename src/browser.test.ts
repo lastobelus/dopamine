@@ -83,6 +83,24 @@ describe("shell framing changes", () => {
     timers[0]!();
     await setImmediate();
     expect(navigations).toHaveLength(3);
+    address = "http://new-site.localhost/reports?tab=reports";
+    timers[0]!();
+    await setImmediate();
+    expect(navigations.at(-1)).toBe(address);
+    events.message!({
+      source: contentWindow,
+      origin: "http://new-site.localhost",
+      data: { type: "dopamine:location", url: "http://new-site.localhost/" },
+    });
+    expect(new URLSearchParams(location.search).get("dopamine-path")).toBe("/");
+    expect(nodes["#direct"]!.href).toBe("http://new-site.localhost/");
+    allowed = false;
+    timers[0]!();
+    await setImmediate();
+    allowed = true;
+    timers[0]!();
+    await setImmediate();
+    expect(navigations.at(-1)).toBe("http://new-site.localhost/");
   });
 });
 
