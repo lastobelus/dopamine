@@ -302,11 +302,33 @@ describe("hub HTTP boundaries", () => {
   });
 });
 
+async function website(deny: boolean) {
+  const server = createServer((_req, res) => {
+    if (deny) res.setHeader("x-frame-options", "DENY");
+    res.end("Example server");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("No website address");
+  const close = () =>
+    new Promise<void>((resolve) => {
+      if (server.listening) server.close(() => resolve());
+      else resolve();
+    });
+  cleanups.push(close);
+  return { origin: `http://website.localhost:${address.port}`, close };
+}
+
 describe("authenticated peer routing", () => {
   it("keeps duplicate local IDs separate, forwards views, discards supplied headers and fails closed when the peer is down", async () => {
     const peer = await fixture({ machine: "worker", hubId: "peer-hub" });
     const hub = await fixture({
-      peer: { machine: "worker", hubId: "peer-hub", origin: `http://127.0.0.1:${peer.port}` },
+      peer: {
+        machine: "worker",
+        hubId: "peer-hub",
+        origin: `http://127.0.0.1:${peer.port}`,
+        host: `127.0.0.1:${peer.port}`,
+      },
       peerCredentialFile: peer.peerCredentialFile,
     });
     peer.config.viewingOrigin = hub.config.viewingOrigin;
@@ -389,7 +411,12 @@ describe("authenticated peer routing", () => {
     if (!address || typeof address === "string") throw new Error("Missing receiver address");
     const peer = await fixture({ machine: "worker", hubId: "peer-hub" });
     const hub = await fixture({
-      peer: { machine: "worker", hubId: "peer-hub", origin: `http://127.0.0.1:${peer.port}` },
+      peer: {
+        machine: "worker",
+        hubId: "peer-hub",
+        origin: `http://127.0.0.1:${peer.port}`,
+        host: `127.0.0.1:${peer.port}`,
+      },
       peerCredentialFile: peer.peerCredentialFile,
     });
     peer.config.viewingOrigin = hub.config.viewingOrigin;
@@ -407,7 +434,12 @@ describe("authenticated peer routing", () => {
   it("redirects remote document navigations before proxying, keeping direct, data and frame loads intact", async () => {
     const peer = await fixture({ machine: "worker", hubId: "peer-hub" });
     const hub = await fixture({
-      peer: { machine: "worker", hubId: "peer-hub", origin: `http://127.0.0.1:${peer.port}` },
+      peer: {
+        machine: "worker",
+        hubId: "peer-hub",
+        origin: `http://127.0.0.1:${peer.port}`,
+        host: `127.0.0.1:${peer.port}`,
+      },
       peerCredentialFile: peer.peerCredentialFile,
     });
     peer.config.viewingOrigin = hub.config.viewingOrigin;
@@ -436,10 +468,105 @@ describe("authenticated peer routing", () => {
       (await send(hub, "/data.json", { host, headers: { "sec-fetch-dest": "document" } })).status,
     ).toBe(200);
   });
+  it("probes remote URL dashboards from the viewing side after applying their URL override", async () => {
+    const source = await website(false),
+      viewing = await website(true);
+    const peer = await fixture({ machine: "worker", hubId: "peer-hub" });
+    const hub = await fixture({
+      peer: {
+        machine: "worker",
+        hubId: "peer-hub",
+        origin: `http://127.0.0.1:${peer.port}`,
+        host: `127.0.0.1:${peer.port}`,
+      },
+      peerCredentialFile: peer.peerCredentialFile,
+      urlOverrides: { "example--worker": viewing.origin },
+    });
+    peer.config.viewingOrigin = hub.config.viewingOrigin;
+    await peer.store.create({
+      id: "example",
+      title: "Existing server",
+      kind: "url",
+      url: source.origin,
+    });
+    const index = (await send(hub, "/api/index")).value();
+    expect(index.peer.reachable).toBe(true);
+    expect(index.dashboards[0]).toMatchObject({
+      status: "reachable",
+      frameAllowed: false,
+      manifest: { url: viewing.origin },
+    });
+    await viewing.close();
+    const down = (await send(hub, "/api/index")).value();
+    expect(down.peer.reachable).toBe(true);
+    expect(down.dashboards[0].status).toBe("unreachable");
+    expect(
+      (await send(peer, "/api/list", { host: `127.0.0.1:${peer.port}` })).value().dashboards[0]
+        .status,
+    ).toBe("reachable");
+  });
+  it("uses the peer's loopback Host across a transport endpoint on a different port", async () => {
+    const peer = await fixture({ machine: "worker", hubId: "peer-hub" });
+    const transport = createServer((incoming, outgoing) => {
+      const forward = request(
+        {
+          hostname: "127.0.0.1",
+          port: peer.port,
+          method: incoming.method,
+          path: incoming.url,
+          headers: incoming.headers,
+        },
+        (reply) => {
+          outgoing.writeHead(reply.statusCode!, reply.headers);
+          reply.pipe(outgoing);
+        },
+      );
+      forward.on("error", () => outgoing.writeHead(502).end());
+      incoming.pipe(forward);
+    });
+    await new Promise<void>((resolve) => transport.listen(0, "127.0.0.1", resolve));
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          transport.closeAllConnections();
+          transport.close(() => resolve());
+        }),
+    );
+    const address = transport.address();
+    if (!address || typeof address === "string") throw new Error("No transport address");
+    const hub = await fixture({
+      peer: {
+        machine: "worker",
+        hubId: "peer-hub",
+        origin: `http://127.0.0.1:${address.port}`,
+        host: `127.0.0.1:${peer.port}`,
+      },
+      peerCredentialFile: peer.peerCredentialFile,
+    });
+    peer.config.viewingOrigin = hub.config.viewingOrigin;
+    await create(peer);
+    await peer.store.post(
+      "example",
+      "rows",
+      "remote",
+      { value: "Through transport" },
+      "environment/thread",
+    );
+    expect((await send(hub, "/api/index")).value().peer.reachable).toBe(true);
+    expect(
+      (await send(hub, "/data.json", { host: pageHost(hub, "example--worker") })).value()
+        .collections.rows.items.remote.value,
+    ).toBe("Through transport");
+  });
   it("rejects a stray service whose reported peer identity differs", async () => {
     const peer = await fixture({ machine: "worker" });
     const hub = await fixture({
-      peer: { machine: "worker", hubId: "wrong", origin: `http://127.0.0.1:${peer.port}` },
+      peer: {
+        machine: "worker",
+        hubId: "wrong",
+        origin: `http://127.0.0.1:${peer.port}`,
+        host: `127.0.0.1:${peer.port}`,
+      },
     });
     expect((await send(hub, "/api/index")).value().peer.reachable).toBe(false);
   });

@@ -4,22 +4,22 @@ The hub, CLI and deployer read the same private JSON file. Select it with `DOPAM
 
 ## Configuration
 
-| Field                | Meaning                                                                                       |
-| -------------------- | --------------------------------------------------------------------------------------------- |
-| `machine`            | Lowercase machine slug, used in dashboard names and keys.                                     |
-| `hubId`              | Stable random installation identity.                                                          |
-| `port`               | Loopback listener port.                                                                       |
-| `dataRoot`           | Absolute dashboard storage directory.                                                         |
-| `tokenFile`          | Absolute path to a token of at least 32 characters, mode 600.                                 |
-| `viewingOrigin`      | Exact HTTP origin of the control index and shells.                                            |
-| `dashboardDomain`    | Domain suffix for per-dashboard origins.                                                      |
-| `peerCredentialFile` | Optional absolute path to a shared peer secret, mode 600.                                     |
-| `peer`               | Optional `{machine, hubId, origin}`. Its origin must be loopback HTTP.                        |
-| `remotes`            | Optional map from machine to `{host, dash, config?}` for CLI SSH routing.                     |
-| `adapter`            | Optional `{home, environmentId, threadCommand?}` for harness identity and thread-state reads. |
-| `serviceHint`        | Optional private diagnostic text for a stopped hub.                                           |
-| `sourceCommit`       | Optional source-checkout identity; an installed deployment receipt takes precedence.          |
-| `urlOverrides`       | Optional dashboard-key to viewing-side registered-server URL mapping.                         |
+| Field                | Meaning                                                                                                                                                                                |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `machine`            | Lowercase machine slug, used in dashboard names and keys.                                                                                                                              |
+| `hubId`              | Stable random installation identity.                                                                                                                                                   |
+| `port`               | Loopback listener port.                                                                                                                                                                |
+| `dataRoot`           | Absolute dashboard storage directory.                                                                                                                                                  |
+| `tokenFile`          | Absolute path to a token of at least 32 characters, mode 600.                                                                                                                          |
+| `viewingOrigin`      | Exact HTTP origin of the control index and shells.                                                                                                                                     |
+| `dashboardDomain`    | Domain suffix for per-dashboard origins.                                                                                                                                               |
+| `peerCredentialFile` | Optional absolute path to a shared peer secret, mode 600.                                                                                                                              |
+| `peer`               | Optional `{machine, hubId, origin, host}`. Its origin must be loopback HTTP; `host` is the owning hub’s literal loopback HTTP authority, which may differ from the transport endpoint. |
+| `remotes`            | Optional map from machine to `{host, dash, config?}` for CLI SSH routing.                                                                                                              |
+| `adapter`            | Optional `{home, environmentId, threadCommand?}` for harness identity and thread-state reads.                                                                                          |
+| `serviceHint`        | Optional private diagnostic text for a stopped hub.                                                                                                                                    |
+| `sourceCommit`       | Optional source-checkout identity; an installed deployment receipt takes precedence.                                                                                                   |
+| `urlOverrides`       | Optional dashboard-key to viewing-side registered-server URL mapping.                                                                                                                  |
 
 Origins are configuration, not a discovery mechanism. A peer must report the configured machine and hub ID before it is trusted. The transport to a peer is provisioned outside the hub. The hub never widens its bind address to expose itself to a network.
 

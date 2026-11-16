@@ -188,7 +188,9 @@ export async function startHub(input: HubConfig): Promise<{
   async function peerReady(): Promise<void> {
     if (!config.peer) throw new HttpError(503, "Peer is not configured");
     try {
-      const result = await call(new URL("/healthz", config.peer.origin));
+      const result = await call(new URL("/healthz", config.peer.origin), "GET", {
+        host: config.peer.host,
+      });
       const health = JSON.parse(result.body.toString()) as { machine: string; hubId: string };
       if (
         result.status !== 200 ||
@@ -198,6 +200,28 @@ export async function startHub(input: HubConfig): Promise<{
         throw new Error();
     } catch {
       throw new HttpError(503, "Peer is unreachable");
+    }
+  }
+  async function probeUrl(address: string): Promise<{ status: string; frameAllowed: boolean }> {
+    const registered = new URL(address);
+    const probe = new URL(registered);
+    probe.hostname = "127.0.0.1";
+    try {
+      const result = await call(probe, "GET", { host: registered.host }, undefined, 1000);
+      const xfo = result.headers["x-frame-options"]?.toUpperCase();
+      const ancestors = result.headers["content-security-policy"]?.match(
+        /(?:^|;)\s*frame-ancestors\s+([^;]+)/i,
+      )?.[1];
+      return {
+        status: result.status < 400 ? "reachable" : "unreachable",
+        frameAllowed:
+          !xfo &&
+          (!ancestors ||
+            ancestors.split(/\s+/).includes(config.viewingOrigin) ||
+            ancestors.trim() === "*"),
+      };
+    } catch {
+      return { status: "unreachable", frameAllowed: false };
     }
   }
   async function summary(record: DashboardRecord): Promise<Summary> {
@@ -212,26 +236,10 @@ export async function startHub(input: HubConfig): Promise<{
           ? "stale"
           : "fresh";
     let frameAllowed = true;
-    if (record.manifest.kind === "url") {
-      const registered = new URL(config.urlOverrides?.[key] ?? record.manifest.url!);
-      const probe = new URL(registered);
-      probe.hostname = "127.0.0.1";
-      try {
-        const result = await call(probe, "GET", { host: registered.host }, undefined, 1000);
-        status = result.status < 400 ? "reachable" : "unreachable";
-        const xfo = result.headers["x-frame-options"]?.toUpperCase();
-        const ancestors = result.headers["content-security-policy"]?.match(
-          /(?:^|;)\s*frame-ancestors\s+([^;]+)/i,
-        )?.[1];
-        frameAllowed =
-          !xfo &&
-          (!ancestors ||
-            ancestors.split(/\s+/).includes(config.viewingOrigin) ||
-            ancestors.trim() === "*");
-      } catch {
-        status = "unreachable";
-      }
-    }
+    if (record.manifest.kind === "url")
+      ({ status, frameAllowed } = await probeUrl(
+        config.urlOverrides?.[key] ?? record.manifest.url!,
+      ));
     return {
       ...record,
       key,
@@ -258,19 +266,25 @@ export async function startHub(input: HubConfig): Promise<{
         await peerReady();
         const response = await call(new URL("/api/list", config.peer.origin), "GET", {
           "x-dopamine-peer": peerSecret,
+          host: config.peer.host,
         });
         const result = JSON.parse(response.body.toString()) as { dashboards: Summary[] };
         if (response.status !== 200 || !Array.isArray(result.dashboards)) throw new Error();
-        for (const item of result.dashboards) {
-          if (item.manifest.machine !== config.peer.machine) throw new Error();
-          item.key = `${item.manifest.id}--${item.manifest.machine}`;
-          keyParts(item.key);
-          item.url = shellUrl(config, item.key);
-          item.origin = dashboardOrigin(config, item.key);
-          if (item.manifest.kind === "url" && config.urlOverrides?.[item.key])
-            item.manifest.url = config.urlOverrides[item.key]!;
-          dashboards.push(item);
-        }
+        const remote = await Promise.all(
+          result.dashboards.map(async (item) => {
+            if (item.manifest.machine !== config.peer!.machine) throw new Error();
+            item.key = `${item.manifest.id}--${item.manifest.machine}`;
+            keyParts(item.key);
+            item.url = shellUrl(config, item.key);
+            item.origin = dashboardOrigin(config, item.key);
+            if (item.manifest.kind === "url") {
+              item.manifest.url = config.urlOverrides?.[item.key] ?? item.manifest.url!;
+              Object.assign(item, await probeUrl(item.manifest.url));
+            }
+            return item;
+          }),
+        );
+        dashboards.push(...remote);
         peer.reachable = true;
       } catch {
         /* Show the unreachable peer explicitly; never pretend it is empty. */
@@ -300,7 +314,7 @@ export async function startHub(input: HubConfig): Promise<{
     await peerReady();
     const bytes = changing ? Buffer.from(JSON.stringify(await body(req))) : undefined;
     const headers: Record<string, string> = {
-      host: new URL(config.peer!.origin).host,
+      host: config.peer!.host,
       "x-dopamine-peer": peerSecret,
       "x-dopamine-key": key,
     };
@@ -478,6 +492,7 @@ export async function startHub(input: HubConfig): Promise<{
           "POST",
           {
             "x-dopamine-peer": peerSecret,
+            host: config.peer.host,
             origin: config.viewingOrigin,
             "content-type": "application/json",
           },

@@ -11,7 +11,7 @@ export interface HubConfig {
   dashboardDomain: string;
   sourceCommit?: string;
   peerCredentialFile?: string;
-  peer?: { machine: string; hubId: string; origin: string };
+  peer?: { machine: string; hubId: string; origin: string; host: string };
   dashboardOrigins?: Record<string, string>;
   urlOverrides?: Record<string, string>;
   remotes?: Record<string, { host: string; dash: string; config?: string }>;
@@ -44,6 +44,9 @@ export function validateConfig(value: unknown): HubConfig {
   if (!/^[a-z0-9.-]+$/.test(cfg.dashboardDomain)) throw new Error("Invalid dashboard domain");
   if (cfg.peer) {
     const peer = new URL(cfg.peer.origin);
+    const peerHost = new URL(`http://${cfg.peer.host}`);
+    if (!["127.0.0.1", "[::1]"].includes(peerHost.hostname) || peerHost.host !== cfg.peer.host)
+      throw new Error("Peer Host must be a literal loopback authority");
     if (
       !loopback(peer) ||
       peer.protocol !== "http:" ||
