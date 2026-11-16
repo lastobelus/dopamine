@@ -1,0 +1,86 @@
+import { readFile, stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
+
+export interface HubConfig {
+  machine: string;
+  hubId: string;
+  port: number;
+  dataRoot: string;
+  tokenFile: string;
+  viewingOrigin: string;
+  dashboardDomain: string;
+  sourceCommit?: string;
+  peerCredentialFile?: string;
+  peer?: { machine: string; hubId: string; origin: string };
+  dashboardOrigins?: Record<string, string>;
+  urlOverrides?: Record<string, string>;
+  remotes?: Record<string, { host: string; dash: string; config?: string }>;
+  adapter?: { home: string; environmentId: string; threadCommand?: string[] };
+  serviceHint?: string;
+}
+
+export function loopback(url: URL): boolean {
+  return ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname);
+}
+
+export function validateConfig(value: unknown): HubConfig {
+  if (!value || typeof value !== "object") throw new Error("Invalid private configuration");
+  const cfg = value as HubConfig;
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(cfg.machine) || !cfg.hubId)
+    throw new Error("Configuration needs a machine slug and hub ID");
+  if (!Number.isInteger(cfg.port) || cfg.port < 0 || cfg.port > 65535)
+    throw new Error("Configuration needs a valid port");
+  for (const p of [cfg.dataRoot, cfg.tokenFile, cfg.peerCredentialFile].filter(Boolean))
+    if (typeof p !== "string" || !isAbsolute(p))
+      throw new Error("Configuration paths must be absolute");
+  const viewing = new URL(cfg.viewingOrigin);
+  if (
+    viewing.protocol !== "http:" ||
+    viewing.origin !== cfg.viewingOrigin ||
+    viewing.username ||
+    viewing.password
+  )
+    throw new Error("Viewing origin must be an HTTP origin");
+  if (!/^[a-z0-9.-]+$/.test(cfg.dashboardDomain)) throw new Error("Invalid dashboard domain");
+  if (cfg.peer) {
+    const peer = new URL(cfg.peer.origin);
+    if (
+      !loopback(peer) ||
+      peer.protocol !== "http:" ||
+      peer.origin !== cfg.peer.origin ||
+      !cfg.peerCredentialFile ||
+      !cfg.peer.hubId
+    )
+      throw new Error("Peer must use a loopback HTTP origin and a private credential");
+  }
+  for (const origin of Object.values(cfg.dashboardOrigins ?? {})) {
+    const u = new URL(origin);
+    if (u.protocol !== "http:" || u.origin !== origin) throw new Error("Invalid dashboard origin");
+  }
+  return cfg;
+}
+
+export async function readConfig(path = process.env.DOPAMINE_CONFIG): Promise<HubConfig> {
+  if (!path)
+    throw new Error("Set DOPAMINE_CONFIG or pass --config with a private configuration file");
+  return validateConfig(JSON.parse(await readFile(path, "utf8")));
+}
+
+export async function readSecret(path: string): Promise<string> {
+  const info = await stat(path);
+  if ((info.mode & 0o077) !== 0) throw new Error("Secret file must be readable only by its owner");
+  const secret = (await readFile(path, "utf8")).trim();
+  if (secret.length < 32) throw new Error("Secret must contain at least 32 characters");
+  return secret;
+}
+
+export function dashboardOrigin(config: HubConfig, key: string): string {
+  return (
+    config.dashboardOrigins?.[key] ??
+    `http://${key}.${config.dashboardDomain}${new URL(config.viewingOrigin).port ? `:${new URL(config.viewingOrigin).port}` : ""}`
+  );
+}
+
+export function shellUrl(config: HubConfig, key: string): string {
+  return `${config.viewingOrigin}/d/${encodeURIComponent(key)}`;
+}
