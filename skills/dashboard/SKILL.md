@@ -17,6 +17,8 @@ description: Dopamine dashboards, live pages a thread publishes once and then up
 
 Run `dash --help` for exact arguments.
 
+If `dash --help` does not list these commands, a system shell also named `dash` is shadowing the CLI. A harness that was already running can keep a cached `PATH` that finds the shell first. List the candidates with `type -a dash`, then run the CLI by the path set in the deployment's private config.
+
 | Command                                              | Use                                                                             |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `dash create <id> --title '...' [--from-starter]`    | Create a dashboard. `--from-starter` copies the starter page.                   |
@@ -49,10 +51,13 @@ Write ordinary HTML, JavaScript and assets yourself, or start from the starter p
 - Each child thread posts only under its own keys in a shared collection.
 - The coordinator owns ordered collections, such as questions and decisions, and writes them with `dash set-collection`.
 - Declare a collection holding questions for the reader with the `questions` type, so the hub gathers them into its combined **Needs you** view.
+- A question's `status` is `open` (the default), `answered` or `withdrawn`. When the owner parks a matter, move it into a generic decisions collection, and move it back to the questions collection when it needs the reader again.
 
 ## Post as you work
 
 Run `dash post` after every report or decision, and before every wait, so the dashboard is current whenever the reader looks.
+
+Post contributed fields as plain text: the starter shows them exactly as written, with no Markdown rendering. For formatted material, upload the source document with `dash attach` and name it in the posted text.
 
 ## Check and share it
 

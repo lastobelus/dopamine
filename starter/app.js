@@ -50,6 +50,7 @@ function render(data) {
       sections.set(name, section);
       root.append(section);
     }
+    section.hidden = collection.order.length === 0;
     for (const key of collection.order) {
       const item = collection.items[key];
       if (!item) continue;

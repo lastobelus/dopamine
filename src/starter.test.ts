@@ -80,6 +80,23 @@ const item = (rev: number, value: unknown) => ({
   value,
 });
 describe("starter rendering", () => {
+  it("hides empty collection headings and shows them when an item returns", async () => {
+    const { render, root } = await page();
+    render({ rev: 1, collections: { questions: { rev: 1, order: [], items: {} } } });
+    const section = root.children[0]!;
+    expect(section.hidden).toBe(true);
+    render({
+      rev: 2,
+      collections: {
+        questions: { rev: 2, order: ["one"], items: { one: item(2, { title: "Question" }) } },
+      },
+    });
+    expect(section.hidden).toBe(false);
+    expect(section.text()).toContain("Question");
+    render({ rev: 3, collections: { questions: { rev: 3, order: [], items: {} } } });
+    expect(section.hidden).toBe(true);
+    expect(section.all().filter((node) => node.tag === "article")).toHaveLength(0);
+  });
   it("keeps distinct slash-containing collection and item pairs in separate cards", async () => {
     const { render, root } = await page();
     render({
