@@ -88,7 +88,11 @@ async function readJson<T>(path: string): Promise<T> {
   }
 }
 
-async function atomicWrite(path: string, body: Buffer | string): Promise<void> {
+async function atomicWrite(
+  path: string,
+  body: Buffer | string,
+  renamed?: () => void,
+): Promise<void> {
   const parent = dirname(path);
   await noSymlinks(parent);
   try {
@@ -110,14 +114,15 @@ async function atomicWrite(path: string, body: Buffer | string): Promise<void> {
       await handle.close();
     }
     await rename(temporary, path);
+    renamed?.();
     await syncDirectory(parent);
   } finally {
     await rm(temporary, { force: true });
   }
 }
 
-async function writeJson(path: string, value: unknown): Promise<void> {
-  await atomicWrite(path, `${JSON.stringify(value)}\n`);
+async function writeJson(path: string, value: unknown, renamed?: () => void): Promise<void> {
+  await atomicWrite(path, `${JSON.stringify(value)}\n`, renamed);
 }
 
 function filePath(value: unknown, single = false): string {
@@ -467,8 +472,9 @@ export class DashboardStore {
         }
         await syncDirectory(stage);
         await syncDirectory(generations);
-        await writeJson(join(this.root, id, "page.json"), { generation });
-        published = true;
+        await writeJson(join(this.root, id, "page.json"), { generation }, () => {
+          published = true;
+        });
       } finally {
         if (!published) await rm(stage, { recursive: true, force: true });
       }

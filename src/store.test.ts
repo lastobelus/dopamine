@@ -1,8 +1,9 @@
 /* eslint-disable no-await-in-loop -- These checks exercise sequential mutations and observe concurrent writes. */
-import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   lstat,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -12,6 +13,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
@@ -73,6 +75,39 @@ describe("DashboardStore", () => {
     expect((await stat(join(root, "example", "data.json"))).mode & 0o777).toBe(0o600);
   });
 
+  it("retains the visible page generation when directory sync fails after pointer rename", async () => {
+    await create();
+    await store.publish("example", { "index.html": encoded("old page") });
+    const previous = JSON.parse(
+      await readFile(join(root, "example", "page.json"), "utf8"),
+    ).generation;
+    const handle = await open(root, "r");
+    const prototype = Object.getPrototypeOf(handle) as { sync: FileHandle["sync"] };
+    const original = prototype.sync;
+    await handle.close();
+    let injected = false;
+    const spy = vi.spyOn(prototype, "sync").mockImplementation(async function (this: FileHandle) {
+      if (!injected && (await this.stat()).isDirectory()) {
+        const current = JSON.parse(
+          await readFile(join(root, "example", "page.json"), "utf8"),
+        ).generation;
+        if (current !== previous) {
+          injected = true;
+          throw Object.assign(new Error("Injected sync failure"), { code: "EIO" });
+        }
+      }
+      await original.call(this);
+    });
+    try {
+      await expect(
+        store.publish("example", { "index.html": encoded("new page") }),
+      ).rejects.toMatchObject({ status: 500 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(injected).toBe(true);
+    expect((await store.readPage("example", "index.html")).toString()).toBe("new page");
+  });
   it("validates naming, manifests and immutable fields", async () => {
     for (const id of ["Upper", "two--parts", "-start", "end-", "../outside", "a/b", ""]) {
       await expect(create({ id })).rejects.toMatchObject({ status: 400 });

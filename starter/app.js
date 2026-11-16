@@ -53,7 +53,7 @@ function render(data) {
     for (const key of collection.order) {
       const item = collection.items[key];
       if (!item) continue;
-      const stable = `${name}/${key}`;
+      const stable = JSON.stringify([name, key]);
       active.add(stable);
       let card = cards.get(stable);
       if (card?.dataset.rev === String(item.rev)) {
