@@ -7,7 +7,8 @@ describe("shell framing changes", () => {
   it("applies a prohibition discovered after an outage without reloading an unchanged frame", async () => {
     const nodes: Record<string, Record<string, unknown>> = {};
     const navigations: string[] = [];
-    const frame: Record<string, unknown> = { hidden: true };
+    const contentWindow = {};
+    const frame: Record<string, unknown> = { hidden: true, contentWindow };
     Object.defineProperty(frame, "src", {
       set: (value: string) => {
         navigations.push(value);
@@ -15,9 +16,10 @@ describe("shell framing changes", () => {
     });
     nodes["#dashboard"] = frame;
     const timers: (() => void)[] = [];
+    const events: Record<string, (event: unknown) => void> = {};
     const location = { pathname: "/d/example--worker", search: "", hash: "" };
     let allowed = true,
-      address = "http://example.localhost/";
+      address = "http://example.localhost/#/reports";
     runInNewContext(await readFile(new URL("../web/shell.js", import.meta.url), "utf8"), {
       document: { querySelector: (selector: string) => (nodes[selector] ??= { hidden: true }) },
       location,
@@ -30,7 +32,9 @@ describe("shell framing changes", () => {
       },
       URL,
       URLSearchParams,
-      addEventListener() {},
+      addEventListener: (name: string, callback: (event: unknown) => void) => {
+        events[name] = callback;
+      },
       setInterval: (callback: () => void) => timers.push(callback),
       async fetch() {
         return {
@@ -46,6 +50,14 @@ describe("shell framing changes", () => {
     });
     await setImmediate();
     expect(navigations).toHaveLength(1);
+    expect(navigations[0]).toBe(address);
+    expect(nodes["#direct"]!.href).toBe(address);
+    events.message!({
+      source: contentWindow,
+      origin: "http://example.localhost",
+      data: { type: "dopamine:location", url: "http://example.localhost/" },
+    });
+    expect(nodes["#direct"]!.href).toBe("http://example.localhost/");
     timers[0]!();
     await setImmediate();
     expect(navigations).toHaveLength(1);

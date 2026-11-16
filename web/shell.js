@@ -12,7 +12,7 @@ function frameAddress() {
   if (path && path.startsWith("/") && !path.startsWith("//") && !path.includes("\\"))
     url.pathname = path;
   if (params.size) url.search = params.toString();
-  url.hash = location.hash;
+  if (location.hash || path !== null) url.hash = location.hash;
   return url;
 }
 function updateDirect() {
@@ -72,7 +72,13 @@ addEventListener("message", (event) => {
       const params = new URLSearchParams(address.search);
       params.delete("dopamine-direct");
       params.delete("dopamine-confirm");
-      if (address.pathname !== "/") params.set("dopamine-path", address.pathname);
+      if (
+        address.pathname !== "/" ||
+        (dashboard.manifest.kind === "url" &&
+          new URL(dashboard.manifest.url).hash !== "" &&
+          address.hash === "")
+      )
+        params.set("dopamine-path", address.pathname);
       history.replaceState(
         null,
         "",
