@@ -74,13 +74,6 @@ export function evaluateReview(
       "review-unresolved",
       `${unresolved} review threads remain unresolved.`,
     );
-  if (inline.some((comment) => comment.user?.login === bot && comment.commit_id === head)) {
-    return decision(
-      "attention",
-      "review-findings",
-      "Codex reported inline findings on the current head.",
-    );
-  }
 
   const artifacts: { at: number; id: number; verdict: Decision }[] = [];
   for (const comment of comments) {
@@ -175,6 +168,16 @@ export function evaluateReview(
   // An explicit running summary cannot be replaced by an unrelated approval or reaction.
   if (artifacts.some((artifact) => artifact.verdict.status === "pending")) {
     return decision("pending", "review-pending", "Current-head Codex Review is still running.");
+  }
+  if (
+    !latest &&
+    inline.some((comment) => comment.user?.login === bot && comment.commit_id === head)
+  ) {
+    return decision(
+      "attention",
+      "review-findings",
+      "Codex reported inline findings on the current head.",
+    );
   }
   return (
     latest?.verdict ??

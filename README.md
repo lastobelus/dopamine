@@ -1,6 +1,6 @@
 # dopamine
 
-Dopamine is a tiny tool that makes it convenient for agents to stand up ad hoc dashboards they can update, and which potentially outlive the thread. Read a dashboard in a browser or beside an agent conversation.
+Dopamine lets agent threads publish small dashboards and keep them current with JSON updates. The pages remain available after the conversation ends, in a browser or beside another thread.
 
 Write an ordinary HTML page, publish it once, then post JSON as work changes. Each dashboard has its own origin. A small hub serves its files, keeps ordered collections and reader state, and puts a common status strip above the page. Several threads can contribute to the same dashboard. A second hub can contribute to the same index through an authenticated loopback connection.
 

@@ -165,9 +165,9 @@ describe("completed current-head review", () => {
       expect(evaluateReview(head, [summary(state)], [], [], 0).status).toBe("attention");
     }
     expect(evaluateReview(head, [summary()], [], [], 1).reason).toBe("review-unresolved");
-    expect(
-      evaluateReview(head, [summary()], [], [{ ...summary(), commit_id: head }], 0).reason,
-    ).toBe("review-findings");
+    expect(evaluateReview(head, [], [], [{ ...summary(), commit_id: head }], 0).reason).toBe(
+      "review-findings",
+    );
   });
   it("invalidates an earlier clean result after a new review request", () => {
     const trigger = {
@@ -211,6 +211,17 @@ describe("completed current-head review", () => {
         summary({ status: "running" }).body + completed.body.slice(completed.body.indexOf("\n|")),
     };
     expect(evaluateReview(head, [running, trigger], [], [], 0).status).toBe("pending");
+  });
+  it("allows resolved historical inline findings after a clean same-head rerun", () => {
+    const inline = [{ ...summary(), commit_id: head }];
+    expect(evaluateReview(head, [summary()], [], inline, 0).status).toBe("ready");
+    expect(evaluateReview(head, [summary()], [], inline, 1).reason).toBe("review-unresolved");
+    expect(evaluateReview(head, [summary({ has_any_findings: true })], [], inline, 0).status).toBe(
+      "attention",
+    );
+    expect(evaluateReview(head, [summary({ status: "running" })], [], inline, 0).status).toBe(
+      "pending",
+    );
   });
   it("does not let formal approval bypass missing or finding-bearing structured review", () => {
     const approval = {
