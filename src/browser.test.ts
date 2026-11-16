@@ -15,10 +15,19 @@ describe("shell framing changes", () => {
     });
     nodes["#dashboard"] = frame;
     const timers: (() => void)[] = [];
-    let allowed = true;
+    const location = { pathname: "/d/example--worker", search: "", hash: "" };
+    let allowed = true,
+      address = "http://example.localhost/";
     runInNewContext(await readFile(new URL("../web/shell.js", import.meta.url), "utf8"), {
       document: { querySelector: (selector: string) => (nodes[selector] ??= { hidden: true }) },
-      location: { pathname: "/d/example--worker", search: "", hash: "" },
+      location,
+      history: {
+        replaceState(_state: unknown, _unused: string, target: string) {
+          const url = new URL(target, "http://hub.localhost");
+          location.search = url.search;
+          location.hash = url.hash;
+        },
+      },
       URL,
       URLSearchParams,
       addEventListener() {},
@@ -27,7 +36,7 @@ describe("shell framing changes", () => {
         return {
           ok: true,
           json: async () => ({
-            manifest: { kind: "url", url: "http://example.localhost/", title: "Example" },
+            manifest: { kind: "url", url: address, title: "Example" },
             updatedAt: new Date().toISOString(),
             status: allowed ? "unreachable" : "reachable",
             frameAllowed: allowed,
@@ -52,6 +61,16 @@ describe("shell framing changes", () => {
     expect(frame.hidden).toBe(false);
     expect(nodes["#blocked"]!.hidden).toBe(true);
     expect(navigations).toHaveLength(2);
+    location.search = "?dopamine-path=%2Fold&tab=previous";
+    location.hash = "#old";
+    address = "http://new-site.localhost/new?tab=current";
+    timers[0]!();
+    await setImmediate();
+    expect(navigations.at(-1)).toBe(address);
+    expect(navigations).toHaveLength(3);
+    timers[0]!();
+    await setImmediate();
+    expect(navigations).toHaveLength(3);
   });
 });
 

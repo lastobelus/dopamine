@@ -319,6 +319,25 @@ async function website(deny: boolean) {
   return { origin: `http://website.localhost:${address.port}`, close };
 }
 
+describe("local URL dashboard overrides", () => {
+  it("returns the probed viewing-side address without changing the stored registration", async () => {
+    const source = await website(false),
+      viewing = await website(true);
+    const hub = await fixture({ urlOverrides: { "example--workstation": viewing.origin } });
+    await hub.store.create({ id: "example", title: "Example", kind: "url", url: source.origin });
+    const listing = (await send(hub, "/api/list")).value().dashboards[0];
+    expect(listing).toMatchObject({
+      manifest: { url: viewing.origin },
+      status: "reachable",
+      frameAllowed: false,
+    });
+    expect((await send(hub, "/api/shell/example--workstation")).value().manifest.url).toBe(
+      viewing.origin,
+    );
+    expect((await hub.store.get("example")).manifest.url).toBe(source.origin);
+  });
+});
+
 describe("authenticated peer routing", () => {
   it("keeps duplicate local IDs separate, forwards views, discards supplied headers and fails closed when the peer is down", async () => {
     const peer = await fixture({ machine: "worker", hubId: "peer-hub" });

@@ -226,6 +226,7 @@ export async function startHub(input: HubConfig): Promise<{
   }
   async function summary(record: DashboardRecord): Promise<Summary> {
     const key = `${record.manifest.id}--${record.manifest.machine}`;
+    const manifest = { ...record.manifest };
     const ownerState = await threadState(config, record.manifest.owner);
     const handlerState = await threadState(config, record.manifest.handler);
     let status =
@@ -236,12 +237,13 @@ export async function startHub(input: HubConfig): Promise<{
           ? "stale"
           : "fresh";
     let frameAllowed = true;
-    if (record.manifest.kind === "url")
-      ({ status, frameAllowed } = await probeUrl(
-        config.urlOverrides?.[key] ?? record.manifest.url!,
-      ));
+    if (manifest.kind === "url") {
+      manifest.url = config.urlOverrides?.[key] ?? manifest.url!;
+      ({ status, frameAllowed } = await probeUrl(manifest.url));
+    }
     return {
       ...record,
+      manifest,
       key,
       url: shellUrl(config, key),
       origin: dashboardOrigin(config, key),
