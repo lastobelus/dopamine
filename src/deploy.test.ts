@@ -194,6 +194,16 @@ describe("private-config deployment", () => {
     expect((await readFile(cfg.tokenFile, "utf8")).trim()).toMatch(/^[a-f0-9]{64}$/);
     expect(await readFile(cfg.peerCredentialFile!, "utf8")).toBe("private-peer");
     expect(JSON.parse(await readFile(cfgFile, "utf8"))).toEqual(cfg);
+    await writeFile(join(app, ".DS_Store"), "Finder metadata");
+    await writeFile(join(app, "bin", ".DS_Store"), "nested metadata");
+    expect(await deploy(cfgFile, { source })).toBe(firstCommit);
+    expect(await readFile(join(cfg.deploy.root, "last-good", "app", ".DS_Store"), "utf8")).toBe(
+      "Finder metadata",
+    );
+    const status = await readFile(statusFile);
+    await writeFile(join(app, "unexpected.js"), "untracked executable content");
+    await expect(deploy(cfgFile, { source })).rejects.toThrow("inventory differs");
+    expect(await readFile(statusFile)).toEqual(status);
   });
 
   it("refuses dirty and untracked source without stopping the old app", async () => {

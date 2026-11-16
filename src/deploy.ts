@@ -18,7 +18,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { loopback, readConfig, readSecret } from "./config.ts";
@@ -347,7 +347,9 @@ async function receipt(app: string): Promise<Receipt> {
     typeof value.files !== "object"
   )
     throw new DeploymentError("Saved deployment receipt is invalid");
-  const names = await treeFiles(app);
+  const names = (await treeFiles(app)).filter(
+    (name) => basename(name) !== ".DS_Store" || Object.hasOwn(value.files, name),
+  );
   if (names.length !== Object.keys(value.files).length + 1)
     throw new DeploymentError("Saved app file inventory differs from receipt");
   for (const name of names.filter((file) => file !== "deployment.json"))
