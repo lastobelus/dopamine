@@ -208,6 +208,21 @@ describe("private-config deployment", () => {
     expect(await readFile(statusFile)).toEqual(status);
   });
 
+  it("recovers the previous running worker after a later stop command fails", async () => {
+    await deploy(cfgFile, { source });
+    const before = await readFile(join(cfg.deploy.root, "app", "deployment.json"));
+    cfg.deploy.stop.push([process.execPath, "-e", "process.exit(1)"]);
+    await saveConfig();
+    await expect(deploy(cfgFile, { source })).rejects.toThrow(
+      "previous app and service files restored",
+    );
+    expect(await readFile(join(cfg.deploy.root, "app", "deployment.json"))).toEqual(before);
+    expect(JSON.parse(await readFile(statusFile, "utf8")).sourceCommit).toBe(firstCommit);
+    expect(await readdir(cfg.deploy.root)).not.toContain("recovery");
+    cfg.deploy.stop.pop();
+    await saveConfig();
+    expect(await deploy(cfgFile, { source })).toBe(firstCommit);
+  });
   it("restores the exact app, service mode and CLI after a broken candidate restart", async () => {
     await deploy(cfgFile, { source });
     const app = join(cfg.deploy.root, "app");

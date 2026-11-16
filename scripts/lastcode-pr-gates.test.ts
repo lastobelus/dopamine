@@ -186,6 +186,32 @@ describe("completed current-head review", () => {
       ).status,
     ).toBe("pending");
   });
+  it("accepts a completed same-head rerun only when the code-review lifecycle timestamp follows the request", () => {
+    const trigger = {
+      id: 2,
+      created_at: "2026-01-02T00:00:00Z",
+      author_association: "OWNER",
+      body: `@codex review\n<!-- lastcode-review-head: ${head} -->`,
+    };
+    const completed = { ...summary(), updated_at: "2026-01-03T00:00:01Z" };
+    completed.body +=
+      '\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-01-03T00:00:00Z">done</relative-time> |';
+    expect(evaluateReview(head, [completed, trigger], [], [], 0).status).toBe("ready");
+    const unchangedLifecycle = {
+      ...completed,
+      body: completed.body.replace(
+        'datetime="2026-01-03T00:00:00Z"',
+        'datetime="2026-01-01T00:00:00Z"',
+      ),
+    };
+    expect(evaluateReview(head, [unchangedLifecycle, trigger], [], [], 0).status).toBe("pending");
+    const running = {
+      ...summary({ status: "running" }),
+      body:
+        summary({ status: "running" }).body + completed.body.slice(completed.body.indexOf("\n|")),
+    };
+    expect(evaluateReview(head, [running, trigger], [], [], 0).status).toBe("pending");
+  });
   it("does not let formal approval bypass missing or finding-bearing structured review", () => {
     const approval = {
       ...summary(),

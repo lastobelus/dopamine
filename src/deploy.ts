@@ -207,7 +207,8 @@ function render(text: string, ctx: Context): string {
   });
 }
 
-async function commands(ctx: Context, kind: "stop" | "start") {
+async function commands(ctx: Context, kind: "stop" | "start", continueAfterError = false) {
+  let failed = false;
   for (const command of ctx.config.deploy[kind]) {
     const args = command.map((arg) => render(arg, ctx));
     try {
@@ -217,9 +218,12 @@ async function commands(ctx: Context, kind: "stop" | "start") {
         maxBuffer: 1024 * 1024,
       });
     } catch {
-      throw new DeploymentError(`Configured service ${kind} command failed`);
+      failed = true;
+      if (!continueAfterError)
+        throw new DeploymentError(`Configured service ${kind} command failed`);
     }
   }
+  if (failed) throw new DeploymentError(`Configured service ${kind} command failed`);
 }
 
 async function atomicFile(path: string, body: Uint8Array | string, mode: number) {
@@ -502,8 +506,8 @@ export async function deploy(
         }
         await token(ctx);
         const old = await capture(ctx, recovery);
-        await commands(ctx, "stop");
         try {
+          await commands(ctx, "stop");
           if (rollbackState) await restore(ctx, candidate, rollbackState);
           else {
             await rm(ctx.app, { recursive: true, force: true });
@@ -520,10 +524,10 @@ export async function deploy(
           await healthy(ctx, next.sourceCommit);
         } catch {
           try {
-            await commands(ctx, "stop");
+            await commands(ctx, "stop", true).catch(() => undefined);
             await restore(ctx, recovery, old);
             if (old.app) {
-              await commands(ctx, "start");
+              await commands(ctx, "start", true);
               await healthy(ctx, (await receipt(ctx.app)).sourceCommit);
             }
           } catch {

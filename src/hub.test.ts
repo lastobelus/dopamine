@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { request } from "node:http";
+import { createServer, request } from "node:http";
 import { randomBytes } from "node:crypto";
 import { startHub } from "./hub.ts";
 import type { HubConfig } from "./config.ts";
@@ -376,6 +376,65 @@ describe("authenticated peer routing", () => {
     expect(index.peer.reachable).toBe(false);
     expect(index.dashboards).toHaveLength(1);
     expect((await send(hub, "/data.json", { host: remoteHost })).status).toBe(503);
+  });
+  it("refuses network-path and absolute targets without sending the peer credential away", async () => {
+    let contacted = false;
+    const receiver = createServer((_req, res) => {
+      contacted = true;
+      res.end("unexpected");
+    });
+    await new Promise<void>((resolve) => receiver.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => receiver.close(() => resolve())));
+    const address = receiver.address();
+    if (!address || typeof address === "string") throw new Error("Missing receiver address");
+    const peer = await fixture({ machine: "worker", hubId: "peer-hub" });
+    const hub = await fixture({
+      peer: { machine: "worker", hubId: "peer-hub", origin: `http://127.0.0.1:${peer.port}` },
+      peerCredentialFile: peer.peerCredentialFile,
+    });
+    peer.config.viewingOrigin = hub.config.viewingOrigin;
+    await create(peer);
+    for (const target of [
+      `//127.0.0.1:${address.port}/`,
+      `http://127.0.0.1:${address.port}/`,
+      `/%2f127.0.0.1:${address.port}/`,
+    ])
+      expect((await send(hub, target, { host: pageHost(hub, "example--worker") })).status).toBe(
+        400,
+      );
+    expect(contacted).toBe(false);
+  });
+  it("redirects remote document navigations before proxying, keeping direct, data and frame loads intact", async () => {
+    const peer = await fixture({ machine: "worker", hubId: "peer-hub" });
+    const hub = await fixture({
+      peer: { machine: "worker", hubId: "peer-hub", origin: `http://127.0.0.1:${peer.port}` },
+      peerCredentialFile: peer.peerCredentialFile,
+    });
+    peer.config.viewingOrigin = hub.config.viewingOrigin;
+    await create(peer);
+    const host = pageHost(hub, "example--worker");
+    const result = await send(hub, "/details.html?tab=two", {
+      host,
+      headers: { "sec-fetch-dest": "document" },
+    });
+    expect(result.status).toBe(302);
+    expect(result.headers.location).toBe(
+      `${hub.config.viewingOrigin}/d/example--worker?dopamine-path=%2Fdetails.html&tab=two`,
+    );
+    expect(
+      (
+        await send(hub, "/details.html?dopamine-direct=1", {
+          host,
+          headers: { "sec-fetch-dest": "document" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await send(hub, "/details.html", { host, headers: { "sec-fetch-dest": "iframe" } })).status,
+    ).toBe(200);
+    expect(
+      (await send(hub, "/data.json", { host, headers: { "sec-fetch-dest": "document" } })).status,
+    ).toBe(200);
   });
   it("rejects a stray service whose reported peer identity differs", async () => {
     const peer = await fixture({ machine: "worker" });

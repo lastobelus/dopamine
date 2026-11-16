@@ -58,6 +58,9 @@ const decision = (status: Decision["status"], reason: string, detail: string): D
   detail,
 });
 
+const timestamp = (value: string | undefined) =>
+  value && Number.isFinite(Date.parse(value)) ? Date.parse(value) : 0;
+
 export function evaluateReview(
   head: string,
   comments: Comment[],
@@ -78,7 +81,8 @@ export function evaluateReview(
       "Codex reported inline findings on the current head.",
     );
   }
-  const artifacts: { at: string; id: number; verdict: Decision }[] = [];
+
+  const artifacts: { at: number; id: number; verdict: Decision }[] = [];
   for (const comment of comments) {
     if (comment.user?.login !== bot) continue;
     const summary =
@@ -110,7 +114,18 @@ export function evaluateReview(
             "Codex Review reports findings or has incomplete result fields.",
           );
         }
-        artifacts.push({ at: comment.created_at ?? "", id: comment.id, verdict });
+        const row = comment.body
+          .split("\n")
+          .find((line) => line.startsWith("|") && line.includes("**Code Review**"));
+        const completed = row?.match(/\*\*Completed\*\*\s*<relative-time datetime="([^"]+)"/u)?.[1];
+        const completedAt = timestamp(completed);
+        const at =
+          state.status === "completed" &&
+          completedAt >= timestamp(comment.created_at) &&
+          completedAt <= timestamp(comment.updated_at)
+            ? completedAt
+            : timestamp(comment.created_at);
+        artifacts.push({ at, id: comment.id, verdict });
       } catch {
         return decision(
           "attention",
@@ -129,7 +144,7 @@ export function evaluateReview(
     )
       continue;
     artifacts.push({
-      at: review.submitted_at ?? "",
+      at: timestamp(review.submitted_at),
       id: review.id,
       verdict:
         review.state === "PENDING"
@@ -141,7 +156,7 @@ export function evaluateReview(
             ),
     });
   }
-  artifacts.sort((a, b) => a.at.localeCompare(b.at) || a.id - b.id);
+  artifacts.sort((a, b) => a.at - b.at || a.id - b.id);
   const latest = artifacts.at(-1);
   const triggers = comments.filter((comment) => {
     if (!["OWNER", "MEMBER", "COLLABORATOR"].includes(comment.author_association ?? ""))
@@ -150,7 +165,7 @@ export function evaluateReview(
     const requestedHead = /<!-- lastcode-review-head: ([0-9a-f]{40}) -->/u.exec(comment.body)?.[1];
     return requestedHead === undefined || requestedHead === head;
   });
-  if (triggers.some((trigger) => !latest || (trigger.created_at ?? "") >= latest.at)) {
+  if (triggers.some((trigger) => !latest || timestamp(trigger.created_at) >= latest.at)) {
     return decision(
       "pending",
       "review-pending",

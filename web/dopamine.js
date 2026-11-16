@@ -78,11 +78,10 @@
           if (response.status !== 304) {
             if (!response.ok) throw new Error(`Dashboard refresh failed (${response.status}).`);
             const data = await response.json();
+            if (stopped) return;
+            if (data.rev !== rev) await callback(data);
+            rev = data.rev;
             etag = response.headers.get("ETag");
-            if (data.rev !== rev && !stopped) {
-              rev = data.rev;
-              callback(data);
-            }
           }
         } catch (error) {
           if (!stopped) onError(error);

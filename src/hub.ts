@@ -123,6 +123,8 @@ function call(
   });
 }
 function safePath(raw: string): string {
+  if (!raw.startsWith("/") || raw.startsWith("//"))
+    throw new HttpError(400, "Invalid request target");
   let path: string;
   try {
     path = decodeURIComponent(raw.split("?")[0] ?? "/");
@@ -130,6 +132,7 @@ function safePath(raw: string): string {
     throw new HttpError(400, "Invalid path");
   }
   if (
+    path.startsWith("//") ||
     path.includes("\\") ||
     path.includes("\0") ||
     path.split("/").some((p) => p === "." || p === "..")
@@ -304,12 +307,12 @@ export async function startHub(input: HubConfig): Promise<{
     if (req.headers.origin) headers.origin = req.headers.origin;
     if (req.headers["if-none-match"]) headers["if-none-match"] = req.headers["if-none-match"];
     if (bytes) headers["content-type"] = "application/json";
-    const response = await call(
-      new URL(req.url ?? path, config.peer!.origin),
-      req.method,
-      headers,
-      bytes,
-    );
+    const target = new URL(config.peer!.origin);
+    target.pathname = path;
+    target.search = (req.url ?? "").includes("?")
+      ? (req.url ?? "").slice((req.url ?? "").indexOf("?"))
+      : "";
+    const response = await call(target, req.method, headers, bytes);
     const returned: Record<string, string> = {};
     for (const header of [
       "content-type",
@@ -331,8 +334,27 @@ export async function startHub(input: HubConfig): Promise<{
     forwarded: boolean,
   ): Promise<void> {
     const parts = keyParts(key);
-    if (parts.machine !== config.machine) return proxy(req, res, key, path);
     originGuard(req, dashboardOrigin(config, key), !["GET", "HEAD"].includes(req.method ?? ""));
+    const address = new URL(req.url ?? "/", dashboardOrigin(config, key));
+    const pageRoute =
+      !path.startsWith("/api/") &&
+      !path.startsWith("/files/") &&
+      !["/data.json", "/dopamine.js", "/dopamine-meta.json", "/healthz"].includes(path);
+    if (
+      !forwarded &&
+      req.method === "GET" &&
+      pageRoute &&
+      req.headers["sec-fetch-dest"] === "document" &&
+      address.searchParams.get("dopamine-direct") !== "1"
+    ) {
+      const shell = new URL(shellUrl(config, key));
+      if (path !== "/") shell.searchParams.set("dopamine-path", path);
+      for (const [name, value] of address.searchParams) shell.searchParams.append(name, value);
+      res.writeHead(302, { location: shell.href });
+      res.end();
+      return;
+    }
+    if (parts.machine !== config.machine) return proxy(req, res, key, path);
     const record = await store.get(parts.id);
     if (path === "/api/view") {
       if (req.method === "GET") return json(res, await store.getView(parts.id));
@@ -368,19 +390,6 @@ export async function startHub(input: HubConfig): Promise<{
       res.setHeader("content-type", "text/plain; charset=utf-8");
       res.setHeader("content-disposition", `inline; filename*=UTF-8''${encodeURIComponent(name)}`);
       res.end(await store.readAttachment(parts.id, name));
-      return;
-    }
-    const address = new URL(req.url ?? "/", dashboardOrigin(config, key));
-    if (
-      !forwarded &&
-      req.headers["sec-fetch-dest"] === "document" &&
-      address.searchParams.get("dopamine-direct") !== "1"
-    ) {
-      const shell = new URL(shellUrl(config, key));
-      if (path !== "/") shell.searchParams.set("dopamine-path", path);
-      for (const [name, value] of address.searchParams) shell.searchParams.append(name, value);
-      res.writeHead(302, { location: shell.href });
-      res.end();
       return;
     }
     if (record.manifest.kind !== "page")

@@ -5,6 +5,8 @@ let saved = {},
   current,
   ready = false,
   debounce;
+const display = (value) =>
+  typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? "");
 const el = (tag, text, className) => {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -62,8 +64,7 @@ function render(data) {
         card = el("article", undefined, "item");
         cards.set(stable, card);
       }
-      card.replaceChildren();
-      card.dataset.rev = String(item.rev);
+      const content = document.createDocumentFragment();
       const value = item.value,
         record = value && typeof value === "object" && !Array.isArray(value) ? value : {};
       const title = typeof record.title === "string" ? record.title : key;
@@ -78,38 +79,50 @@ function render(data) {
           cite.textContent = "Couldn't copy";
         }
       });
-      card.append(cite, el("h3", `${key} · ${title}`));
-      if (typeof record.recommendation === "string") card.append(el("p", record.recommendation));
+      content.append(cite, el("h3", `${key} · ${title}`));
+      if (typeof record.recommendation === "string") content.append(el("p", record.recommendation));
       if (record.value !== undefined && ["string", "number"].includes(typeof record.value))
-        card.append(el("div", String(record.value), "metric"));
-      if (Array.isArray(record.options) || record.context) {
+        content.append(el("div", display(record.value), "metric"));
+      const options = Array.isArray(record.options)
+        ? record.options.filter(
+            (option) => option && typeof option === "object" && typeof option.label === "string",
+          )
+        : [];
+      if (options.length || record.context) {
         const details = el("details");
         details.dataset.key = stable;
         details.open = opened.has(stable);
         details.append(el("summary", "Context and options"));
-        if (record.context) details.append(el("p", String(record.context)));
-        for (const option of record.options ?? []) {
+        if (record.context) details.append(el("p", display(record.context)));
+        for (const option of options) {
           details.append(el("p", option.label));
           if (option.pros)
             details.append(
-              el("p", `Pros: ${Array.isArray(option.pros) ? option.pros.join("; ") : option.pros}`),
+              el(
+                "p",
+                `Pros: ${Array.isArray(option.pros) ? option.pros.map(display).join("; ") : display(option.pros)}`,
+              ),
             );
           if (option.cons)
             details.append(
-              el("p", `Cons: ${Array.isArray(option.cons) ? option.cons.join("; ") : option.cons}`),
+              el(
+                "p",
+                `Cons: ${Array.isArray(option.cons) ? option.cons.map(display).join("; ") : display(option.cons)}`,
+              ),
             );
         }
         details.addEventListener("toggle", save);
-        card.append(details);
+        content.append(details);
       } else if (record.description || record.status)
-        card.append(el("p", String(record.description ?? record.status)));
-      else card.append(el("pre", JSON.stringify(value, null, 2)));
+        content.append(el("p", display(record.description ?? record.status)));
+      else content.append(el("pre", JSON.stringify(value, null, 2)));
       for (const entry of Array.isArray(record.links) ? record.links : []) {
+        if (!entry || typeof entry !== "object") continue;
         const href = typeof entry.href === "string" && safeLink(entry.href);
         if (href) {
-          const a = el("a", String(entry.label ?? entry.href));
+          const a = el("a", display(entry.label ?? entry.href));
           a.href = href;
-          card.append(a, document.createTextNode(" "));
+          content.append(a, document.createTextNode(" "));
         }
       }
       const when = new Intl.DateTimeFormat("en-CA", {
@@ -117,7 +130,9 @@ function render(data) {
         dateStyle: "medium",
         timeStyle: "short",
       }).format(new Date(item.at));
-      card.append(el("small", `${item.by} · ${when} PT`));
+      content.append(el("small", `${item.by} · ${when} PT`));
+      card.replaceChildren(content);
+      card.dataset.rev = String(item.rev);
       section.append(card);
     }
   }
