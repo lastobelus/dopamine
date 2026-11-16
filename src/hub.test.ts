@@ -500,6 +500,7 @@ describe("authenticated peer routing", () => {
     const down = (await send(hub, "/api/index")).value();
     expect(down.peer.reachable).toBe(true);
     expect(down.dashboards[0].status).toBe("unreachable");
+    expect(down.dashboards[0].frameAllowed).toBe(true);
     expect(
       (await send(peer, "/api/list", { host: `127.0.0.1:${peer.port}` })).value().dashboards[0]
         .status,

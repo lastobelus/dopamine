@@ -221,7 +221,7 @@ export async function startHub(input: HubConfig): Promise<{
             ancestors.trim() === "*"),
       };
     } catch {
-      return { status: "unreachable", frameAllowed: false };
+      return { status: "unreachable", frameAllowed: true };
     }
   }
   async function summary(record: DashboardRecord): Promise<Summary> {
