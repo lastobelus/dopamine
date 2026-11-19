@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-labelledby="title">
+  <title id="title">Dopamine</title>
+  <g fill="#34684e">
+    <circle cx="13.5" cy="18" r="12"/>
+    <rect x="21" y="2" width="8" height="28" rx="4"/>
+  </g>
+  <circle cx="7.5" cy="24" r="2.7" fill="#9ccbac"/>
+  <path fill="#f4f4ef" d="M16.5 7 C17.8 13.205 19.2 14.395 26.5 15.5 C19.2 16.605 17.8 17.795 16.5 24 C15.395 17.795 14.205 16.605 8 15.5 C14.205 14.395 15.395 13.205 16.5 7Z"/>
+</svg>

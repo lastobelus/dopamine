@@ -588,7 +588,7 @@ export async function startHub(input: HubConfig): Promise<{
       res.end(await readFile(new URL(path === "/" ? "index.html" : "shell.html", webRoot)));
       return;
     }
-    if (["/hub.js", "/shell.js", "/style.css"].includes(path)) {
+    if (["/hub.js", "/shell.js", "/style.css", "/favicon.svg", "/favicon.ico"].includes(path)) {
       res.setHeader("content-type", mime[extname(path)]!);
       res.end(await readFile(fileURLToPath(new URL(path.slice(1), webRoot))));
       return;
