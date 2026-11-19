@@ -81,6 +81,20 @@ function send(
     req.end(options.body === undefined ? undefined : JSON.stringify(options.body));
   });
 }
+// A fake private adapter: answers `read <threadId> --json` from fixed results.
+async function fakeAdapter(environmentId: string, results: Record<string, unknown>) {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), "adapter-test-"));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const script = join(directory, "adapter.mjs");
+  await writeFile(
+    script,
+    `const results = ${JSON.stringify(results)};
+const id = process.argv[3];
+if (!(id in results)) process.exit(1);
+process.stdout.write(JSON.stringify(results[id]));`,
+  );
+  return { home: directory, environmentId, threadCommand: [process.execPath, script] };
+}
 const pageHost = (h: Hub, key = "example--workstation") => `${key}.hub.localhost:${h.port}`;
 const pageOrigin = (h: Hub, key = "example--workstation") => `http://${pageHost(h, key)}`;
 async function create(hub: Hub, extra: Record<string, unknown> = {}) {
@@ -315,6 +329,44 @@ describe("hub HTTP boundaries", () => {
         expect.objectContaining({ key: "unowned--workstation", ownerThreadUrl: null }),
       ]),
     );
+  });
+  it("adds the owner's project from the adapter and keeps only its id and title", async () => {
+    const hub = await fixture({
+      adapter: await fakeAdapter("environment", {
+        known: {
+          archived: false,
+          project: { id: "project-1", title: "Example project", workspaceRoot: "/private/path" },
+        },
+        archived: { archived: true },
+        malformed: { archived: false, project: { id: "", title: 7 } },
+      }),
+    });
+    const owned = async (id: string, threadId: string, environmentId = "environment") =>
+      hub.store.create({ id, title: id, owner: { environmentId, threadId } });
+    await owned("known", "known");
+    await owned("archived", "archived");
+    await owned("malformed", "malformed");
+    await owned("failing", "unanswered");
+    await owned("elsewhere", "known", "other-environment");
+    await hub.store.create({ id: "unowned", title: "Unowned" });
+    const response = await send(hub, "/api/index");
+    expect(response.text).not.toContain("workspaceRoot");
+    const byId = Object.fromEntries(
+      response.value().dashboards.map((d: any) => [d.manifest.id, d]),
+    );
+    expect(byId.known).toMatchObject({
+      ownerState: "available",
+      project: { id: "project-1", title: "Example project" },
+    });
+    expect(byId.archived).toMatchObject({ ownerState: "archived", status: "stale", project: null });
+    expect(byId.malformed).toMatchObject({ ownerState: "available", project: null });
+    expect(byId.failing).toMatchObject({ ownerState: "unknown", project: null });
+    expect(byId.elsewhere).toMatchObject({ ownerState: "unknown", project: null });
+    expect(byId.unowned).toMatchObject({ ownerState: "unknown", project: null });
+    expect((await send(hub, "/api/shell/known--workstation")).value().project).toEqual({
+      id: "project-1",
+      title: "Example project",
+    });
   });
 });
 
@@ -599,6 +651,41 @@ describe("authenticated peer routing", () => {
       (await send(peer, "/api/list", { host: `127.0.0.1:${peer.port}` })).value().dashboards[0]
         .status,
     ).toBe("reachable");
+  });
+  it("carries each peer dashboard's project as resolved by the hub that owns it", async () => {
+    const peer = await fixture({
+      machine: "worker",
+      hubId: "peer-hub",
+      adapter: await fakeAdapter("peer-environment", {
+        remote: { archived: false, project: { id: "project-2", title: "Remote project" } },
+      }),
+    });
+    const hub = await fixture({
+      peer: {
+        machine: "worker",
+        hubId: "peer-hub",
+        origin: `http://127.0.0.1:${peer.port}`,
+        host: `127.0.0.1:${peer.port}`,
+      },
+      peerCredentialFile: peer.peerCredentialFile,
+    });
+    peer.config.viewingOrigin = hub.config.viewingOrigin;
+    await peer.store.create({
+      id: "remote",
+      title: "Remote",
+      owner: { environmentId: "peer-environment", threadId: "remote" },
+    });
+    await peer.store.create({ id: "plain", title: "Plain" });
+    const dashboards = (await send(hub, "/api/index")).value().dashboards;
+    expect(dashboards).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "remote--worker",
+          project: { id: "project-2", title: "Remote project" },
+        }),
+        expect.objectContaining({ key: "plain--worker", project: null }),
+      ]),
+    );
   });
   it("uses the peer's loopback Host across a transport endpoint on a different port", async () => {
     const peer = await fixture({ machine: "worker", hubId: "peer-hub" });

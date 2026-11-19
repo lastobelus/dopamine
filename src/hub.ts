@@ -36,6 +36,14 @@ interface Reply {
   headers: Record<string, string>;
   body: Buffer;
 }
+interface ProjectReference {
+  id: string;
+  title: string;
+}
+interface ThreadState {
+  state: string;
+  project: ProjectReference | null;
+}
 interface Summary extends DashboardRecord {
   key: string;
   url: string;
@@ -43,6 +51,7 @@ interface Summary extends DashboardRecord {
   status: string;
   ownerThreadUrl: string | null;
   ownerState: string;
+  project: ProjectReference | null;
   handlerState: string;
   frameAllowed: boolean;
 }
@@ -176,23 +185,38 @@ function canAttemptFrame(headers: Reply["headers"], target: URL, viewingOrigin: 
       return !allowed || allowed.origin === viewingOrigin;
     });
 }
+const projectText = (text: unknown): text is string =>
+  typeof text === "string" && text.trim().length > 0 && text.length <= 200;
+function projectReference(value: unknown): ProjectReference | null {
+  if (!value || typeof value !== "object") return null;
+  const { id, title } = value as { id?: unknown; title?: unknown };
+  return projectText(id) && projectText(title) ? { id, title } : null;
+}
 async function threadState(
   config: HubConfig,
   owner: { environmentId: string; threadId: string } | null,
-): Promise<string> {
+): Promise<ThreadState> {
+  const unknown = { state: "unknown", project: null };
   const command = config.adapter?.threadCommand;
   if (!owner || !command?.[0] || owner.environmentId !== config.adapter?.environmentId)
-    return "unknown";
+    return unknown;
   try {
     const { stdout } = await execute(
       command[0],
       [...command.slice(1), "read", owner.threadId, "--json"],
       { timeout: 1000, maxBuffer: 1024 * 1024 },
     );
-    const result = JSON.parse(stdout) as { thread?: { archived?: boolean }; archived?: boolean };
-    return (result.thread?.archived ?? result.archived) ? "archived" : "available";
+    const result = JSON.parse(stdout) as {
+      thread?: { archived?: boolean };
+      archived?: boolean;
+      project?: unknown;
+    };
+    return {
+      state: (result.thread?.archived ?? result.archived) ? "archived" : "available",
+      project: projectReference(result.project),
+    };
   } catch {
-    return "unknown";
+    return unknown;
   }
 }
 
@@ -273,8 +297,8 @@ export async function startHub(input: HubConfig): Promise<{
     const key = `${record.manifest.id}--${record.manifest.machine}`;
     const manifest = { ...record.manifest };
     const owner = manifest.owner;
-    const ownerState = await threadState(config, owner);
-    const handlerState = await threadState(config, record.manifest.handler);
+    const { state: ownerState, project } = await threadState(config, owner);
+    const { state: handlerState } = await threadState(config, record.manifest.handler);
     let status =
       ownerState === "archived"
         ? "stale"
@@ -299,6 +323,7 @@ export async function startHub(input: HubConfig): Promise<{
         : null,
       ownerState,
       handlerState,
+      project,
       frameAllowed,
     };
   }
@@ -328,6 +353,8 @@ export async function startHub(input: HubConfig): Promise<{
             keyParts(item.key);
             item.url = shellUrl(config, item.key);
             item.origin = dashboardOrigin(config, item.key);
+            // Each hub resolves its own owners' projects; an older peer sends none.
+            item.project = projectReference(item.project);
             if (item.manifest.kind === "url") {
               item.manifest.url = config.urlOverrides?.[item.key] ?? item.manifest.url!;
               Object.assign(item, await probeUrl(item.manifest.url));
