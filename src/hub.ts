@@ -161,7 +161,6 @@ function canAttemptFrame(headers: Reply["headers"], target: URL, viewingOrigin: 
 
   // Only preempt a frame when the simple policy clearly denies the shell.
   // The browser handles broader CSP expressions and any additional policies.
-  const viewer = new URL(viewingOrigin);
   return (ancestors[1] ?? "")
     .trim()
     .split(/\s+/)
@@ -174,13 +173,7 @@ function canAttemptFrame(headers: Reply["headers"], target: URL, viewingOrigin: 
           : /^https?:\/\/[a-z\d.-]+(?::\d+)?\/?$/i.test(source)
             ? URL.parse(source)
             : null;
-      return (
-        !allowed ||
-        allowed.origin === viewer.origin ||
-        (allowed.protocol === "http:" &&
-          viewer.protocol === "https:" &&
-          allowed.hostname === viewer.hostname)
-      );
+      return !allowed || allowed.origin === viewingOrigin;
     });
 }
 async function threadState(
