@@ -225,11 +225,16 @@ export async function startHub(input: HubConfig): Promise<{
       const result = await call(new URL("/healthz", config.peer.origin), "GET", {
         host: config.peer.host,
       });
-      const health = JSON.parse(result.body.toString()) as { machine: string; hubId: string };
+      const health = JSON.parse(result.body.toString()) as {
+        machine: string;
+        hubId: string;
+        viewingOrigin: string;
+      };
       if (
         result.status !== 200 ||
         health.machine !== config.peer.machine ||
-        health.hubId !== config.peer.hubId
+        health.hubId !== config.peer.hubId ||
+        health.viewingOrigin !== config.viewingOrigin
       )
         throw new Error();
     } catch {
@@ -472,6 +477,7 @@ export async function startHub(input: HubConfig): Promise<{
         ok: true,
         machine: config.machine,
         hubId: config.hubId,
+        viewingOrigin: config.viewingOrigin,
         sourceCommit: commit,
         schema: 2,
         processId: process.pid,

@@ -390,6 +390,25 @@ describe("local URL dashboard overrides", () => {
 });
 
 describe("authenticated peer routing", () => {
+  it("does not list or serve peer dashboards with a different viewing origin", async () => {
+    const peer = await fixture({ machine: "worker", hubId: "peer-hub" });
+    const hub = await fixture({
+      peer: {
+        machine: "worker",
+        hubId: "peer-hub",
+        origin: `http://127.0.0.1:${peer.port}`,
+        host: `127.0.0.1:${peer.port}`,
+      },
+      peerCredentialFile: peer.peerCredentialFile,
+    });
+    await create(peer);
+    expect((await send(hub, "/api/index")).value()).toMatchObject({
+      dashboards: [],
+      peer: { machine: "worker", reachable: false },
+    });
+    expect((await send(hub, "/", { host: pageHost(hub, "example--worker") })).status).toBe(503);
+  });
+
   it("keeps duplicate local IDs separate, forwards views, discards supplied headers and fails closed when the peer is down", async () => {
     const peer = await fixture({ machine: "worker", hubId: "peer-hub" });
     const hub = await fixture({

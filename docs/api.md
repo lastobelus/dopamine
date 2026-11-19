@@ -21,7 +21,7 @@ The hub, CLI and deployer read the same private JSON file. Select it with `DOPAM
 | `sourceCommit`       | Optional source-checkout identity; an installed deployment receipt takes precedence.                                                                                                   |
 | `urlOverrides`       | Optional dashboard-key to viewing-side registered-server URL mapping.                                                                                                                  |
 
-Origins are configuration, not a discovery mechanism. A peer must report the configured machine and hub ID before it is trusted. The transport to a peer is provisioned outside the hub. The hub never widens its bind address to expose itself to a network.
+Origins are configuration, not a discovery mechanism. Paired hubs must have the same `viewingOrigin`. A peer must report that origin, the configured machine and the configured hub ID before the hub lists or forwards its dashboards. The transport to a peer is provisioned outside the hub. The hub never widens its bind address to expose itself to a network.
 
 A dashboard's ID uses lowercase letters, digits and single hyphens. Its key is `<id>--<machine>`. Its shell address is `<viewingOrigin>/d/<key>`; its page origin is derived from that key and `dashboardDomain`. `dash url` computes the address for callers.
 
