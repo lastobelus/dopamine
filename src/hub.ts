@@ -2,7 +2,7 @@ import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { readFile } from "node:fs/promises";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { extname } from "node:path";
 import { execFile } from "node:child_process";
@@ -50,6 +50,12 @@ function sameSecret(actual: string | undefined, expected: string): boolean {
   const a = Buffer.from(actual ?? ""),
     b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+function originFingerprint(config: HubConfig): string {
+  const origins = Object.entries(config.dashboardOrigins ?? {}).toSorted();
+  return createHash("sha256")
+    .update(JSON.stringify([config.viewingOrigin, config.dashboardDomain, origins]))
+    .digest("hex");
 }
 function keyParts(key: string): { id: string; machine: string } {
   const [id, machine, extra] = key.split("--");
@@ -228,13 +234,13 @@ export async function startHub(input: HubConfig): Promise<{
       const health = JSON.parse(result.body.toString()) as {
         machine: string;
         hubId: string;
-        viewingOrigin: string;
+        originFingerprint: string;
       };
       if (
         result.status !== 200 ||
         health.machine !== config.peer.machine ||
         health.hubId !== config.peer.hubId ||
-        health.viewingOrigin !== config.viewingOrigin
+        health.originFingerprint !== originFingerprint(config)
       )
         throw new Error();
     } catch {
@@ -477,7 +483,7 @@ export async function startHub(input: HubConfig): Promise<{
         ok: true,
         machine: config.machine,
         hubId: config.hubId,
-        viewingOrigin: config.viewingOrigin,
+        originFingerprint: originFingerprint(config),
         sourceCommit: commit,
         schema: 2,
         processId: process.pid,

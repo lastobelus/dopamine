@@ -390,8 +390,12 @@ describe("local URL dashboard overrides", () => {
 });
 
 describe("authenticated peer routing", () => {
-  it("does not list or serve peer dashboards with a different viewing origin", async () => {
-    const peer = await fixture({ machine: "worker", hubId: "peer-hub" });
+  it.each([
+    { viewingOrigin: "http://peer.localhost:0" },
+    { dashboardDomain: "peer.localhost" },
+    { dashboardOrigins: { "example--worker": "http://example.localhost:0" } },
+  ])("does not list or serve peer dashboards with incompatible routing: %o", async (routing) => {
+    const peer = await fixture({ machine: "worker", hubId: "peer-hub", ...routing });
     const hub = await fixture({
       peer: {
         machine: "worker",
@@ -401,6 +405,7 @@ describe("authenticated peer routing", () => {
       },
       peerCredentialFile: peer.peerCredentialFile,
     });
+    if (!routing.viewingOrigin) peer.config.viewingOrigin = hub.config.viewingOrigin;
     await create(peer);
     expect((await send(hub, "/api/index")).value()).toMatchObject({
       dashboards: [],
