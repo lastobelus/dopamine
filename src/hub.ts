@@ -205,10 +205,25 @@ export async function startHub(input: HubConfig): Promise<{
   }
   async function probeUrl(address: string): Promise<{ status: string; frameAllowed: boolean }> {
     const registered = new URL(address);
-    const probe = new URL(registered);
-    probe.hostname = "127.0.0.1";
     try {
-      const result = await call(probe, "GET", { host: registered.host }, undefined, 1000);
+      const request = (target: URL) => {
+        const probe = new URL(target);
+        probe.hostname = "127.0.0.1";
+        return call(probe, "GET", { host: registered.host }, undefined, 1000);
+      };
+      let target = registered;
+      let result = await request(target);
+      for (let redirects = 0; [301, 302, 303, 307, 308].includes(result.status); redirects++) {
+        const location = result.headers.location;
+        if (!location) break;
+        const next = new URL(location, target);
+        // Keep the probe on the configured origin and its existing loopback listener.
+        if (next.origin !== registered.origin || next.username || next.password) break;
+        if (redirects === 3) return { status: "unreachable", frameAllowed: true };
+        target = next;
+        // eslint-disable-next-line no-await-in-loop -- Each response determines the next URL.
+        result = await request(target);
+      }
       const xfo = result.headers["x-frame-options"]?.toUpperCase();
       const ancestors = result.headers["content-security-policy"]?.match(
         /(?:^|;)\s*frame-ancestors\s+([^;]+)/i,

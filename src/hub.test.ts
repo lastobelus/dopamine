@@ -318,8 +318,13 @@ describe("hub HTTP boundaries", () => {
   });
 });
 
-async function website(deny: boolean) {
-  const server = createServer((_req, res) => {
+async function website(deny: boolean, redirect = false) {
+  const server = createServer((req, res) => {
+    if (redirect && req.url === "/") {
+      res.writeHead(302, { location: "/app" });
+      res.end();
+      return;
+    }
     if (deny) res.setHeader("x-frame-options", "DENY");
     res.end("Example server");
   });
@@ -336,6 +341,17 @@ async function website(deny: boolean) {
 }
 
 describe("local URL dashboard overrides", () => {
+  it("checks the framing policy of the document reached by a same-origin redirect", async () => {
+    const source = await website(true, true);
+    const hub = await fixture();
+    await hub.store.create({ id: "example", title: "Example", kind: "url", url: source.origin });
+    expect((await send(hub, "/api/shell/example--workstation")).value()).toMatchObject({
+      manifest: { url: source.origin },
+      status: "reachable",
+      frameAllowed: false,
+    });
+  });
+
   it("returns the probed viewing-side address without changing the stored registration", async () => {
     const source = await website(false),
       viewing = await website(true);
