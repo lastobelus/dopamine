@@ -41,6 +41,7 @@ interface Summary extends DashboardRecord {
   url: string;
   origin: string;
   status: string;
+  ownerThreadUrl: string | null;
   ownerState: string;
   handlerState: string;
   frameAllowed: boolean;
@@ -227,7 +228,8 @@ export async function startHub(input: HubConfig): Promise<{
   async function summary(record: DashboardRecord): Promise<Summary> {
     const key = `${record.manifest.id}--${record.manifest.machine}`;
     const manifest = { ...record.manifest };
-    const ownerState = await threadState(config, record.manifest.owner);
+    const owner = manifest.owner;
+    const ownerState = await threadState(config, owner);
     const handlerState = await threadState(config, record.manifest.handler);
     let status =
       ownerState === "archived"
@@ -248,6 +250,9 @@ export async function startHub(input: HubConfig): Promise<{
       url: shellUrl(config, key),
       origin: dashboardOrigin(config, key),
       status,
+      ownerThreadUrl: owner
+        ? `t3-thread://v2/${encodeURIComponent(owner.environmentId)}/${encodeURIComponent(owner.threadId)}`
+        : null,
       ownerState,
       handlerState,
       frameAllowed,

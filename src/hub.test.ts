@@ -300,6 +300,22 @@ describe("hub HTTP boundaries", () => {
         .status,
     ).toBe("open");
   });
+  it("exposes the dashboard owner's scoped link in both the index and shell", async () => {
+    const hub = await fixture();
+    await create(hub, {
+      owner: { environmentId: "owner-environment", threadId: "mcp:launch:example" },
+      handler: { environmentId: "handler-environment", threadId: "other" },
+    });
+    await hub.store.create({ id: "unowned", title: "Unowned" });
+    const href = "t3-thread://v2/owner-environment/mcp%3Alaunch%3Aexample";
+    expect((await send(hub, "/api/shell/example--workstation")).value().ownerThreadUrl).toBe(href);
+    expect((await send(hub, "/api/index")).value().dashboards).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: "example--workstation", ownerThreadUrl: href }),
+        expect.objectContaining({ key: "unowned--workstation", ownerThreadUrl: null }),
+      ]),
+    );
+  });
 });
 
 async function website(deny: boolean) {

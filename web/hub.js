@@ -13,6 +13,11 @@ const link = (text, href) => {
   a.href = href;
   return a;
 };
+const ownerLink = (dashboard, label = "Owner thread") => {
+  const a = link(label, dashboard.ownerThreadUrl);
+  a.title = dashboard.manifest.owner?.title || label;
+  return a;
+};
 let signature;
 async function refresh() {
   try {
@@ -86,14 +91,7 @@ async function refresh() {
       meta.append(dot, el("span", `${d.manifest.machine} · ${ago(d.updatedAt)} · ${d.status}`));
       if (d.manifest.pinned) meta.append(el("span", "Pinned"));
       if (d.ownerState === "archived") meta.append(el("span", "Thread archived"));
-      const owner = d.manifest.owner;
-      if (owner)
-        meta.append(
-          link(
-            owner.title || "Owner thread",
-            `t3-thread://v1/${encodeURIComponent(owner.environmentId)}/${encodeURIComponent(owner.threadId)}`,
-          ),
-        );
+      if (d.ownerThreadUrl) meta.append(ownerLink(d, d.manifest.owner?.title));
       row.append(top, meta);
       rows.append(row);
       for (const [name, declaration] of Object.entries(d.manifest.collections)) {
@@ -111,6 +109,11 @@ async function refresh() {
       const row = el("article", undefined, "row question");
       row.append(link(`${d.manifest.title} · ${key}`, d.url), el("p", item.value.title));
       if (item.value.recommendation) row.append(el("p", item.value.recommendation, "muted"));
+      if (d.ownerThreadUrl) {
+        const meta = el("div", undefined, "meta");
+        meta.append(ownerLink(d));
+        row.append(meta);
+      }
       questions.append(row);
     }
     document.querySelector("#needs").hidden = needs.length === 0;

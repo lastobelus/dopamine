@@ -21,7 +21,15 @@ describe("shell framing changes", () => {
     let allowed = true,
       address = "http://example.localhost/#/reports";
     runInNewContext(await readFile(new URL("../web/shell.js", import.meta.url), "utf8"), {
-      document: { querySelector: (selector: string) => (nodes[selector] ??= { hidden: true }) },
+      document: {
+        querySelector: (selector: string) =>
+          (nodes[selector] ??= {
+            hidden: true,
+            removeAttribute(name: string) {
+              delete nodes[selector]![name];
+            },
+          }),
+      },
       location,
       history: {
         replaceState(_state: unknown, _unused: string, target: string) {

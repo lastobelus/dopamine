@@ -35,6 +35,14 @@ async function refresh() {
     const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(dashboard.updatedAt)) / 60000));
     document.querySelector("#status").textContent =
       `updated ${minutes} min ago · ${dashboard.status}${dashboard.handlerState === "archived" ? " · handler thread archived" : ""}${dashboard.ownerState === "archived" ? " · thread archived" : ""}`;
+    const owner = document.querySelector("#owner-thread");
+    owner.hidden = !dashboard.ownerThreadUrl;
+    if (dashboard.ownerThreadUrl) {
+      owner.href = dashboard.ownerThreadUrl;
+      owner.title = dashboard.manifest.owner?.title || "Owner thread";
+    } else {
+      owner.removeAttribute("href");
+    }
     document.querySelector("#error").hidden = true;
     const base = dashboard.manifest.kind === "url" ? dashboard.manifest.url : dashboard.origin;
     if (destination !== undefined && destination !== base)
