@@ -144,6 +144,39 @@ function safePath(raw: string): string {
 function pagePolicy(config: HubConfig): string {
   return `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors ${config.viewingOrigin}`;
 }
+function canAttemptFrame(headers: Reply["headers"], target: URL, viewingOrigin: string): boolean {
+  const ancestors = headers["content-security-policy"]?.match(
+    /(?:^|[;,])\s*frame-ancestors(?:\s+([^;,]*))?(?=[;,]|$)/i,
+  );
+  if (!ancestors) {
+    const option = headers["x-frame-options"]?.trim().toUpperCase();
+    return option !== "DENY" && (option !== "SAMEORIGIN" || target.origin === viewingOrigin);
+  }
+
+  // Only preempt a frame when the simple policy clearly denies the shell.
+  // The browser handles broader CSP expressions and any additional policies.
+  const viewer = new URL(viewingOrigin);
+  return (ancestors[1] ?? "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .some((source) => {
+      if (source.toLowerCase() === "'none'") return false;
+      const allowed =
+        source.toLowerCase() === "'self'"
+          ? target
+          : /^https?:\/\/[a-z\d.-]+(?::\d+)?\/?$/i.test(source)
+            ? URL.parse(source)
+            : null;
+      return (
+        !allowed ||
+        allowed.origin === viewer.origin ||
+        (allowed.protocol === "http:" &&
+          viewer.protocol === "https:" &&
+          allowed.hostname === viewer.hostname)
+      );
+    });
+}
 async function threadState(
   config: HubConfig,
   owner: { environmentId: string; threadId: string } | null,
@@ -224,17 +257,9 @@ export async function startHub(input: HubConfig): Promise<{
         // eslint-disable-next-line no-await-in-loop -- Each response determines the next URL.
         result = await request(target);
       }
-      const xfo = result.headers["x-frame-options"]?.toUpperCase();
-      const ancestors = result.headers["content-security-policy"]?.match(
-        /(?:^|;)\s*frame-ancestors\s+([^;]+)/i,
-      )?.[1];
       return {
         status: result.status < 400 ? "reachable" : "unreachable",
-        frameAllowed:
-          !xfo &&
-          (!ancestors ||
-            ancestors.split(/\s+/).includes(config.viewingOrigin) ||
-            ancestors.trim() === "*"),
+        frameAllowed: canAttemptFrame(result.headers, target, config.viewingOrigin),
       };
     } catch {
       return { status: "unreachable", frameAllowed: true };

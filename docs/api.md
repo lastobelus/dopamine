@@ -51,6 +51,8 @@ The shell refuses framing. Its sandboxed iframe retains a separate dashboard ori
 
 An existing server that was stopped when its frame first opened may need a browser reload after it starts. Reachability probes update its status; they do not automatically reload an unchanged frame.
 
+The shell shows **Open directly** for framing restrictions the hub can determine from the response. The browser enforces broader framing policies and may refuse the frame. **Open directly** remains available in the shell bar.
+
 ## Dashboard routes
 
 The validated Host chooses the dashboard. No query parameter selects another dashboard and no dashboard route serves the control API. Read routes set no CORS permissions.
