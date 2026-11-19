@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>dopamine</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="/hub.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">dopamine</p>
+          <h1>Your dashboards</h1>
+        </div>
+        <span id="count" class="muted"></span>
+      </header>
+      <p id="error" role="status" hidden></p>
+      <p id="peer" class="notice" hidden></p>
+      <section id="needs" hidden>
+        <h2>Needs you</h2>
+        <div id="questions" class="stack"></div>
+      </section>
+      <section>
+        <h2>All dashboards</h2>
+        <div id="dashboards" class="stack"></div>
+        <p id="empty" class="muted" hidden>
+          No dashboards yet. They appear here when an agent thread publishes one.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

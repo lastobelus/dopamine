@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>dopamine</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="/shell.js"></script>
+  </head>
+  <body class="shell">
+    <nav class="strip">
+      <a href="/" aria-label="All dashboards">← Dashboards</a><strong id="title"></strong
+      ><span id="status" class="muted"></span><a id="owner-thread" hidden>Owner thread</a
+      ><a id="open-thread" hidden>Open thread</a><a id="direct">Open directly ↗</a>
+    </nav>
+    <p id="error" role="status" hidden></p>
+    <p id="blocked" hidden>
+      This dashboard's site doesn't allow it to be shown here. <a id="outside">Open directly ↗</a>
+    </p>
+    <iframe
+      id="dashboard"
+      title="Dashboard"
+      sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox"
+      allow="clipboard-write"
+      hidden
+    ></iframe>
+  </body>
+</html>

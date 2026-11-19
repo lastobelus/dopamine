@@ -1,0 +1,20 @@
+version = 1
+name = "dopamine"
+
+[setup]
+script = "MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- node scripts/setup-worktree.ts"
+
+[[actions]]
+name = "Run CI"
+icon = "tool"
+command = "MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- pnpm run ci"
+
+[[actions]]
+name = "Test"
+icon = "tool"
+command = "MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- pnpm test"
+
+[[actions]]
+name = "Typecheck"
+icon = "tool"
+command = "MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- pnpm typecheck"

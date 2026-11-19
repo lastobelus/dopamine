@@ -1,0 +1,13 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "server.ts",
+    "bin/*.ts",
+    "{src,bin,scripts,test,tests}/**/*.{test,spec}.ts",
+    "scripts/lastcode-*.ts",
+    "scripts/setup-worktree.ts",
+    "vite.config.ts",
+  ],
+  "project": ["{src,bin,scripts,test,tests}/**/*.ts", "*.ts"],
+  "ignoreBinaries": ["git", "gh"],
+}

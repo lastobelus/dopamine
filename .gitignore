@@ -1,0 +1,14 @@
+node_modules/
+.vite-plus/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+tmp/
+.DS_Store
+!.codex/
+.codex/*
+!.codex/environments/
+.codex/environments/*
+!.codex/environments/environment.toml
