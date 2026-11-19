@@ -10,23 +10,24 @@
     <script defer src="/hub.js"></script>
   </head>
   <body>
-    <main>
+    <main class="hub">
       <header>
-        <div>
-          <p class="eyebrow">dopamine</p>
-          <h1>Your dashboards</h1>
-        </div>
+        <h1><img id="logo" class="logo" src="/favicon.svg" alt="dopamine" />Your dashboards</h1>
         <span id="count" class="muted"></span>
       </header>
+      <nav id="filters" class="filters" aria-label="Filter dashboards" hidden></nav>
       <p id="error" role="status" hidden></p>
       <p id="peer" class="notice" hidden></p>
       <section id="needs" hidden>
-        <h2>Needs you</h2>
+        <h2>Needs you <span id="needs-count" class="pill"></span></h2>
         <div id="questions" class="stack"></div>
       </section>
       <section>
         <h2>All dashboards</h2>
-        <div id="dashboards" class="stack"></div>
+        <div id="dashboards" class="list" hidden></div>
+        <p id="unmatched" class="muted" hidden>
+          No dashboards match these filters. <button id="clear" type="button">Show all</button>
+        </p>
         <p id="empty" class="muted" hidden>
           No dashboards yet. They appear here when an agent thread publishes one.
         </p>
