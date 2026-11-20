@@ -18,10 +18,15 @@ const slug = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const limit = 32 * 1024 * 1024;
 const projectIconLimit = 128 * 1024;
 const projectIconTypes = new Set([
+  "image/avif",
+  "image/bmp",
   "image/gif",
+  "image/heic",
+  "image/heif",
   "image/jpeg",
   "image/png",
   "image/svg+xml",
+  "image/tiff",
   "image/vnd.microsoft.icon",
   "image/webp",
   "image/x-icon",
@@ -212,7 +217,7 @@ function projectSummary(value: unknown, iconUrl?: string): ProjectSummary | null
 async function readProjectIcon(command: string[], projectId: string) {
   try {
     const { stdout } = await execute(command[0]!, [...command.slice(1), projectId, "--json"], {
-      timeout: 2000,
+      timeout: 8000,
       maxBuffer: Math.ceil(projectIconLimit / 3) * 4 + 1024,
     });
     const icon = JSON.parse(stdout) as { mediaType?: unknown; base64?: unknown } | null;
@@ -431,10 +436,13 @@ export async function startHub(input: HubConfig): Promise<{
       if (peerAuthenticated || machine !== config.peer?.machine)
         throw new HttpError(404, "Project icon unavailable");
       await peerReady();
-      const response = await call(new URL(path, config.peer.origin), "GET", {
-        host: config.peer.host,
-        "x-dopamine-peer": peerSecret,
-      });
+      const response = await call(
+        new URL(path, config.peer.origin),
+        "GET",
+        { host: config.peer.host, "x-dopamine-peer": peerSecret },
+        undefined,
+        10000,
+      );
       const mediaType = response.headers["content-type"];
       if (
         response.status !== 200 ||
