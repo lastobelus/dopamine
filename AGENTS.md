@@ -52,10 +52,10 @@ A PR merges only when all of these hold. There is no bypass: no admin merge and 
 
 Immediately before merging, fetch, then recheck the current head and base, every check, unresolved review threads, clean mergeability, and the privacy of the full diff (see above). `pnpm lastcode:pr-gates -- <PR>` reports the gate state.
 
-To wait for CI or a review, run the eligible saved **Wait for PR** Project Action and end your turn. Waiting happens in that Action, not in shell scripts, polling loops or `sleep`.
+To wait for CI or a review on a Dopamine PR, run the eligible saved **Wait for PR** Project Action and end your turn. Waiting happens in that Action, not in shell scripts, polling loops or `sleep`.
 
-## After merging
+## After merging a Dopamine PR
 
-1. Confirm the merge commit is on `main` and its checks pass.
+1. Confirm the merge commit is on `main` and its checks pass. A PR in another repository follows that repository's merge and after-merge rules instead.
 2. Update the main checkout only when that is safe: it is clean and already on `main`. Never switch the main checkout to another branch.
 3. Reconcile linked issues and worktree bookkeeping. Leave unrelated work in place.
