@@ -70,6 +70,15 @@ const initials = (text) => {
   const letters = words.length > 1 ? words[0][0] + words[1][0] : (words[0] ?? "?").slice(0, 2);
   return letters.toUpperCase();
 };
+const iconRetryDelay = 60_000;
+const iconRefreshDelay = 5 * iconRetryDelay;
+function loadProjectIcon(image, revalidate = false) {
+  const now = Date.now();
+  const url = new URL(image.dataset.iconUrl, location.href);
+  if (revalidate) url.searchParams.set("refresh", String(Math.floor(now / iconRetryDelay)));
+  image.dataset.refreshAt = String(now + iconRefreshDelay);
+  image.src = url.href;
+}
 const tile = (project, fallback, size, status) => {
   const node = el("span", undefined, `tile ${size}`);
   const label = el("span", initials(project?.title ?? fallback));
@@ -81,16 +90,18 @@ const tile = (project, fallback, size, status) => {
     const image = el("img", undefined, "tile-image");
     image.alt = "";
     image.hidden = true;
-    image.addEventListener(
-      "load",
-      () => {
-        label.hidden = true;
-        image.hidden = false;
-      },
-      { once: true },
-    );
-    image.src = project.iconUrl;
+    image.dataset.iconUrl = project.iconUrl;
+    image.addEventListener("load", () => {
+      label.hidden = true;
+      image.hidden = false;
+    });
+    image.addEventListener("error", () => {
+      image.hidden = true;
+      label.hidden = false;
+      image.dataset.refreshAt = String(Date.now() + iconRetryDelay);
+    });
     node.append(image);
+    loadProjectIcon(image);
   }
   if (status) node.append(el("span", undefined, `tile-status ${status}`));
   return node;
@@ -335,6 +346,9 @@ function render() {
 
 async function refresh() {
   try {
+    for (const image of document.querySelectorAll(".tile-image")) {
+      if (Number(image.dataset.refreshAt) <= Date.now()) loadProjectIcon(image, true);
+    }
     const response = await fetch("/api/index");
     if (!response.ok)
       throw new Error("Couldn't refresh the dashboard list. Showing the last list that loaded.");
