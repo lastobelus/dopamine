@@ -16,7 +16,7 @@ The hub, CLI and deployer read the same private JSON file. Select it with `DOPAM
 | `peerCredentialFile` | Optional absolute path to a shared peer secret, mode 600.                                                                                                                              |
 | `peer`               | Optional `{machine, hubId, origin, host}`. Its origin must be loopback HTTP; `host` is the owning hub’s literal loopback HTTP authority, which may differ from the transport endpoint. |
 | `remotes`            | Optional map from machine to `{host, dash, config?}` for CLI SSH routing.                                                                                                              |
-| `adapter`            | Optional `{home, environmentId, threadCommand?}` for harness identity and thread-state reads.                                                                                          |
+| `adapter`            | Optional `{home, environmentId, threadCommand?, projectIconCommand?}` for harness identity, thread state and project icons.                                                            |
 | `serviceHint`        | Optional private diagnostic text for a stopped hub.                                                                                                                                    |
 | `sourceCommit`       | Optional source-checkout identity; an installed deployment receipt takes precedence.                                                                                                   |
 | `urlOverrides`       | Optional dashboard-key to viewing-side registered-server URL mapping.                                                                                                                  |
@@ -26,6 +26,8 @@ Origins are configuration, not a discovery mechanism. Paired hubs use the same `
 A dashboard's ID uses lowercase letters, digits and single hyphens. Its key is `<id>--<machine>`. Its shell address is `<viewingOrigin>/d/<key>`; its page origin is derived from that key and `dashboardDomain`. `dash url` computes the address for callers.
 
 The CLI uses `T3CODE_THREAD_ID` only when `T3CODE_HOME` exactly matches `adapter.home`. It records `adapter.environmentId/<threadId>`. `--as <environment>/<thread>` overrides it. This is caller-asserted attribution. Remote commands pass that resolved identity explicitly; their JSON or file archive travels over stdin.
+
+The optional `projectIconCommand` is a command and argument array. The owning hub appends the project ID from its thread adapter and `--json`. The command returns JSON `null` or `{mediaType, base64}` with a browser-compatible image of at most 128 KiB. The index serves the image through the hub and uses initials when it cannot load it.
 
 ## Data
 
@@ -37,15 +39,16 @@ Declare a questions collection with `--collections-json '{"needsYou":{"type":"qu
 
 ## Control routes
 
-| Method and path           | Result                                                                                        |
-| ------------------------- | --------------------------------------------------------------------------------------------- |
-| `GET /`                   | Index with dashboards and combined open questions.                                            |
-| `GET /d/<key>`            | Dashboard shell. Query and fragment select its view; `dopamine-path` preserves a nested page. |
-| `GET /healthz`            | Machine, installation ID, source commit, schema and process identity.                         |
-| `GET /api/list`           | This hub's dashboard summaries.                                                               |
-| `GET /api/index`          | Combined summaries and explicit peer reachability.                                            |
-| `GET /api/dashboard/<id>` | Local manifest and data.                                                                      |
-| `POST /api/remove`        | Owner removal, with JSON `{key}` and the exact control Origin.                                |
+| Method and path               | Result                                                                                        |
+| ----------------------------- | --------------------------------------------------------------------------------------------- |
+| `GET /`                       | Index with dashboards and combined open questions.                                            |
+| `GET /d/<key>`                | Dashboard shell. Query and fragment select its view; `dopamine-path` preserves a nested page. |
+| `GET /healthz`                | Machine, installation ID, source commit, schema and process identity.                         |
+| `GET /api/list`               | This hub's dashboard summaries.                                                               |
+| `GET /api/index`              | Combined summaries and explicit peer reachability.                                            |
+| `GET /api/project-icon/<key>` | Project image for a dashboard with a known owner project.                                     |
+| `GET /api/dashboard/<id>`     | Local manifest and data.                                                                      |
+| `POST /api/remove`            | Owner removal, with JSON `{key}` and the exact control Origin.                                |
 
 The shell refuses framing. Its sandboxed iframe retains a separate dashboard origin and cannot navigate the shell. The shell accepts location and link messages only from its own iframe window and exact origin. External HTTP/HTTPS links open a tab; thread links are relayed at top level with an Open thread fallback button. Intra-dashboard links stay in the frame.
 

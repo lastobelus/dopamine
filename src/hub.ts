@@ -16,6 +16,22 @@ import { dashboardOrigin, readSecret, shellUrl, validateConfig } from "./config.
 const execute = promisify(execFile);
 const slug = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const limit = 32 * 1024 * 1024;
+const projectIconLimit = 128 * 1024;
+const projectIconTypes = new Set([
+  "image/avif",
+  "image/bmp",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+  "image/jpeg",
+  "image/png",
+  "image/svg+xml",
+  "image/tiff",
+  "image/vnd.microsoft.icon",
+  "image/webp",
+  "image/x-icon",
+]);
+const projectIconRoute = "/api/project-icon/";
 const webRoot = new URL("../web/", import.meta.url);
 const mime: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -40,6 +56,7 @@ interface ProjectReference {
   id: string;
   title: string;
 }
+type ProjectSummary = ProjectReference & { iconUrl?: string };
 interface ThreadState {
   state: string;
   project: ProjectReference | null;
@@ -51,7 +68,7 @@ interface Summary extends DashboardRecord {
   status: string;
   ownerThreadUrl: string | null;
   ownerState: string;
-  project: ProjectReference | null;
+  project: ProjectSummary | null;
   handlerState: string;
   frameAllowed: boolean;
 }
@@ -192,6 +209,37 @@ function projectReference(value: unknown): ProjectReference | null {
   const { id, title } = value as { id?: unknown; title?: unknown };
   return projectText(id) && projectText(title) ? { id, title } : null;
 }
+function projectSummary(value: unknown, iconUrl?: string): ProjectSummary | null {
+  const project = projectReference(value);
+  return project && iconUrl ? { ...project, iconUrl } : project;
+}
+
+async function readProjectIcon(command: string[], projectId: string) {
+  try {
+    const { stdout } = await execute(command[0]!, [...command.slice(1), projectId, "--json"], {
+      timeout: 8000,
+      maxBuffer: Math.ceil(projectIconLimit / 3) * 4 + 1024,
+    });
+    const icon = JSON.parse(stdout) as { mediaType?: unknown; base64?: unknown } | null;
+    if (
+      typeof icon?.mediaType !== "string" ||
+      !projectIconTypes.has(icon.mediaType) ||
+      typeof icon.base64 !== "string"
+    )
+      return null;
+    const bytes = Buffer.from(icon.base64, "base64");
+    if (
+      !bytes.length ||
+      bytes.length > projectIconLimit ||
+      bytes.toString("base64") !== icon.base64
+    )
+      return null;
+    return { mediaType: icon.mediaType, bytes };
+  } catch {
+    return null;
+  }
+}
+
 async function threadState(
   config: HubConfig,
   owner: { environmentId: string; threadId: string } | null,
@@ -323,7 +371,10 @@ export async function startHub(input: HubConfig): Promise<{
         : null,
       ownerState,
       handlerState,
-      project,
+      project: projectSummary(
+        project,
+        config.adapter?.projectIconCommand?.[0] && projectIconRoute + key,
+      ),
       frameAllowed,
     };
   }
@@ -354,7 +405,11 @@ export async function startHub(input: HubConfig): Promise<{
             item.url = shellUrl(config, item.key);
             item.origin = dashboardOrigin(config, item.key);
             // Each hub resolves its own owners' projects; an older peer sends none.
-            item.project = projectReference(item.project);
+            const iconUrl = projectIconRoute + item.key;
+            item.project = projectSummary(
+              item.project,
+              item.project?.iconUrl === iconUrl ? iconUrl : undefined,
+            );
             if (item.manifest.kind === "url") {
               item.manifest.url = config.urlOverrides?.[item.key] ?? item.manifest.url!;
               Object.assign(item, await probeUrl(item.manifest.url));
@@ -374,6 +429,40 @@ export async function startHub(input: HubConfig): Promise<{
         b.updatedAt.localeCompare(a.updatedAt),
     );
     return { dashboards, peer };
+  }
+  async function projectIcon(path: string, peerAuthenticated: boolean) {
+    const { id, machine } = keyParts(path.slice(projectIconRoute.length));
+    if (machine !== config.machine) {
+      if (peerAuthenticated || machine !== config.peer?.machine)
+        throw new HttpError(404, "Project icon unavailable");
+      await peerReady();
+      const response = await call(
+        new URL(path, config.peer.origin),
+        "GET",
+        { host: config.peer.host, "x-dopamine-peer": peerSecret },
+        undefined,
+        10000,
+      );
+      const mediaType = response.headers["content-type"];
+      if (
+        response.status !== 200 ||
+        !mediaType ||
+        !projectIconTypes.has(mediaType) ||
+        !response.body.length ||
+        response.body.length > projectIconLimit
+      )
+        throw new HttpError(404, "Project icon unavailable");
+      return { mediaType, bytes: response.body };
+    }
+    const command = config.adapter?.projectIconCommand;
+    if (!command?.[0]) throw new HttpError(404, "Project icon unavailable");
+    const { manifest } = await store.get(id);
+    const { project } = await threadState(config, manifest.owner);
+    if (!project || project.id.startsWith("-"))
+      throw new HttpError(404, "Project icon unavailable");
+    const icon = await readProjectIcon(command, project.id);
+    if (!icon) throw new HttpError(404, "Project icon unavailable");
+    return icon;
   }
   async function proxy(
     req: IncomingMessage,
@@ -582,6 +671,16 @@ export async function startHub(input: HubConfig): Promise<{
       return json(res, { removed: true });
     }
     if (req.method !== "GET") throw new HttpError(405, "Method refused");
+    if (path.startsWith(projectIconRoute)) {
+      const { mediaType, bytes } = await projectIcon(path, peerAuthenticated);
+      res.writeHead(200, {
+        "content-type": mediaType,
+        "content-security-policy": "sandbox; default-src 'none'",
+        "cache-control": "private, max-age=300",
+      });
+      res.end(bytes);
+      return;
+    }
     if (path === "/api/list") return json(res, { dashboards: await localList() });
     if (path === "/api/index")
       return json(res, {

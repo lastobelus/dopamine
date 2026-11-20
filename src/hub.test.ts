@@ -368,6 +368,63 @@ describe("hub HTTP boundaries", () => {
       title: "Example project",
     });
   });
+  it("serves a project icon from the owning hub without exposing adapter details", async () => {
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M0 0h16v16H0z"/></svg>';
+    const adapter = await fakeAdapter("environment", {
+      known: { project: { id: "project-1", title: "Example project" } },
+      missing: { project: { id: "project-2", title: "Another project" } },
+    });
+    const projectIconCommand = [
+      process.execPath,
+      "-e",
+      `const [id, flag] = process.argv.slice(1);
+       if (flag !== "--json") process.exit(1);
+       const result = id === "project-1"
+         ? {mediaType: "image/svg+xml", base64: ${JSON.stringify(Buffer.from(svg).toString("base64"))}}
+         : {mediaType: "text/html", base64: "ZXhhbXBsZQ=="};
+       process.stdout.write(JSON.stringify(result));`,
+      "--",
+    ];
+    const peer = await fixture({ machine: "worker", adapter: { ...adapter, projectIconCommand } });
+    const hub = await fixture({
+      viewingOrigin: peer.config.viewingOrigin,
+      peer: {
+        machine: "worker",
+        hubId: peer.config.hubId,
+        origin: `http://127.0.0.1:${peer.port}`,
+        host: `127.0.0.1:${peer.port}`,
+      },
+      peerCredentialFile: peer.peerCredentialFile,
+    });
+    await create(peer, { owner: { environmentId: "environment", threadId: "known" } });
+    await peer.store.create({
+      id: "missing",
+      title: "Missing",
+      owner: { environmentId: "environment", threadId: "missing" },
+    });
+    const route = "/api/project-icon/example--worker";
+    const index = await send(hub, "/api/index", { host: `127.0.0.1:${hub.port}` });
+    expect(index.value().dashboards).toContainEqual(
+      expect.objectContaining({
+        key: "example--worker",
+        project: { id: "project-1", title: "Example project", iconUrl: route },
+      }),
+    );
+    expect(index.text).not.toContain("base64");
+    const icon = await send(hub, route, { host: `127.0.0.1:${hub.port}` });
+    expect(icon.status).toBe(200);
+    expect(icon.headers["content-type"]).toBe("image/svg+xml");
+    expect(icon.headers["content-security-policy"]).toBe("sandbox; default-src 'none'");
+    expect(icon.text).toBe(svg);
+    expect(
+      (
+        await send(hub, "/api/project-icon/missing--worker", {
+          host: `127.0.0.1:${hub.port}`,
+        })
+      ).status,
+    ).toBe(404);
+  });
 });
 
 async function website(deny: boolean, options: { redirect?: boolean; ancestors?: string } = {}) {

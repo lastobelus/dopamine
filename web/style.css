@@ -157,6 +157,11 @@ a:hover {
 .tile.unknown {
   color: var(--muted);
 }
+.tile-image {
+  width: 84%;
+  height: 84%;
+  object-fit: contain;
+}
 .tile.large {
   width: 34px;
   height: 34px;
