@@ -15,7 +15,12 @@ export interface HubConfig {
   dashboardOrigins?: Record<string, string>;
   urlOverrides?: Record<string, string>;
   remotes?: Record<string, { host: string; dash: string; config?: string }>;
-  adapter?: { home: string; environmentId: string; threadCommand?: string[] };
+  adapter?: {
+    home: string;
+    environmentId: string;
+    threadCommand?: string[];
+    projectIconCommand?: string[];
+  };
   serviceHint?: string;
 }
 

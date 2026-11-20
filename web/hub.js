@@ -49,7 +49,7 @@ const ageLabel = (node) => {
 const health = (status) =>
   status === "unreachable" ? "down" : status === "stale" ? "stale" : "ok";
 
-// Project tiles: lettered squares coloured from the project title, like LastCode's sidebar.
+// Use the project title for a fallback while its icon loads.
 const PALETTE = [
   "#3b82f6",
   "#a855f7",
@@ -71,10 +71,27 @@ const initials = (text) => {
   return letters.toUpperCase();
 };
 const tile = (project, fallback, size, status) => {
-  const node = el("span", initials(project?.title ?? fallback), `tile ${size}`);
+  const node = el("span", undefined, `tile ${size}`);
+  const label = el("span", initials(project?.title ?? fallback));
+  node.append(label);
   node.setAttribute("aria-hidden", "true");
   if (project) node.style.setProperty("--tile", colour(project.title));
   else node.classList.add("unknown");
+  if (project?.iconUrl) {
+    const image = el("img", undefined, "tile-image");
+    image.alt = "";
+    image.hidden = true;
+    image.addEventListener(
+      "load",
+      () => {
+        label.hidden = true;
+        image.hidden = false;
+      },
+      { once: true },
+    );
+    image.src = project.iconUrl;
+    node.append(image);
+  }
   if (status) node.append(el("span", undefined, `tile-status ${status}`));
   return node;
 };
