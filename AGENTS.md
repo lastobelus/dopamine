@@ -52,7 +52,7 @@ A PR merges only when all of these hold. There is no bypass: no admin merge and 
 
 Immediately before merging, fetch, then recheck the current head and base, every check, unresolved review threads, clean mergeability, and the privacy of the full diff (see above). `pnpm lastcode:pr-gates -- <PR>` reports the gate state.
 
-To wait for CI or review on a Dopamine PR, call `watch_pull_request` with the PR's full URL, then take one snapshot with `pnpm lastcode:pr-gates -- <PR>`. On `pending`, end your turn so the watch can resume it. Call `unwatch_pull_request` before handing the PR back to the owner.
+To wait for CI or review on a Dopamine PR, call `watch_pull_request` with the PR's full URL. If you own the merge, pass `until: "merged"`. Then take one snapshot with `pnpm lastcode:pr-gates -- <PR>`. On `pending`, end your turn so the watch can resume it. Call `unwatch_pull_request` before handing the PR back to the owner.
 
 ## After merging a Dopamine PR
 
