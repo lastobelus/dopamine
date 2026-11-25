@@ -1,6 +1,6 @@
 # Dopamine
 
-**Status:** In Progress. Phase 1a is built and deployed; all its acceptance checks except the reboot have been observed (see "Phase 1a is done when"). Phase 1b (actions) is built and tested; its acceptance checks wait for a deployed installation (see "Phase 1b is done when"). Phase 2 (a LastCode change) is built; an installation gets it with its next LastCode build. Phase 3 is decided after a week of real use.
+**Status:** In Progress. Phase 1a is built and deployed; all its acceptance checks except the reboot have been observed (see "Phase 1a is done when"). Phase 1b (actions) is built, deployed and its acceptance checks observed (see "Phase 1b is done when"). Phase 2 (a LastCode change) is built; an installation gets it with its next LastCode build. Phase 3 is decided after a week of real use.
 
 This plan describes dopamine itself, for anyone running it with LastCode or T3 Code across more than one environment. It never names a particular installation. A specific installation keeps its own private plan: which machines, ports, service files and tunnels it uses, and which of the acceptance checks below it has observed.
 
@@ -117,7 +117,7 @@ Observed on an installation with a desktop machine and one peer machine, not inf
 8. A disclosure stays open and the page does not scroll across an update; opening the dashboard beside a thread on the other machine restores the open disclosure.
 9. All tests pass.
 
-**Observed so far on the reference installation (Nov 23–25):** 2; 3, except a thread link from a page dashboard and from Open directly; 4; 5 (threads on each machine posted at the same second, both entries kept, 455 ms apart); 6 (removed from the index, restored with its data); 7; 8; 9. Still open: 1, which needs a reboot of each machine. Each installation records its own observations in its private plan.
+**Observed so far on the reference installation (Nov 23–25):** 2; 3, except a thread link from a page dashboard and from Open directly; 4; 5 (threads on each machine posted at the same second, both entries kept, 455 ms apart); 6 (removed from the index, restored with its data); 7; 8; 9. Not observed: 1. The reference installation chose not to test it and will revisit it only if a normal reboot ever leaves dashboards missing. Each installation records its own observations in its private plan.
 
 ## Phase 1b: actions ✅ built
 
@@ -196,7 +196,7 @@ An earlier dashboard, outside this repository, already delivered button clicks t
 4. Killing the handler after its claim shows unresolved; reconciliation finds the launched thread by request ID and acks it.
 5. All tests pass.
 
-**Observed so far:** 5 (119 tests, in CI). The rest need a deployed installation and a person at the desktop.
+**Observed on the reference installation (Nov 25):** 1, both ways between the two machines; 2, both branches, on isolated hubs running the deployed release; 3, including the shell's confirmation box beside a thread on each machine; 4, where the retained claim showed unresolved after its age threshold, a request-ID search found the launched thread, and one ack marked it done; 5 (153 tests, in CI). Checks 1 to 3 ran on the release before the follow-ups in #13; 4 and 5 ran on the release that includes them.
 
 ## Phase 2: [+] → Dashboards and reusing an open tab (a LastCode PR) ✅ built
 
