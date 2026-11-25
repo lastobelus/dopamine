@@ -171,6 +171,35 @@ function logDate(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
+function validateLoggedClick(request: RequestEvent["request"]): void {
+  if (request.rerunOf !== undefined) {
+    if (
+      request.clickId !== `rerun-${request.requestId}` ||
+      request.click !== canonical({ rerunOf: request.rerunOf })
+    )
+      throw new Error("Invalid rerun click");
+    return;
+  }
+
+  const click = logFields(
+    JSON.parse(request.click),
+    "clickId",
+    "action",
+    "target",
+    "payload",
+    "confirmDuplicate",
+  );
+  if (
+    click.clickId !== request.clickId ||
+    click.action !== request.action ||
+    canonical(click.target) !== canonical(request.target) ||
+    canonical(click.payload ?? null) !== canonical(request.payload) ||
+    (click.confirmDuplicate !== undefined && typeof click.confirmDuplicate !== "boolean") ||
+    canonical(click) !== request.click
+  )
+    throw new Error("Logged click does not match the request");
+}
+
 function readRequest(value: unknown): RequestEvent["request"] {
   const request = logFields(
     value,
@@ -223,7 +252,9 @@ function readRequest(value: unknown): RequestEvent["request"] {
     )
       throw new Error("Invalid collection snapshot");
   }
-  return request as unknown as RequestEvent["request"];
+  const logged = request as unknown as RequestEvent["request"];
+  validateLoggedClick(logged);
+  return logged;
 }
 
 function canApplyTransport(
@@ -396,12 +427,12 @@ function apply({ requests, clicks, attemptsBeforeRetry }: Log, raw: unknown): vo
     const change = event as unknown as TransportEvent;
     if (!canApplyTransport(request, change, attemptsBeforeRetry.get(request.requestId)))
       throw new Error("Invalid transport transition");
-    if (
-      change.transport === "queued" &&
-      (request.transport === "failed" ||
-        (request.transport === "ambiguous" && request.error === REPAIR_ERROR))
-    ) {
-      attemptsBeforeRetry.set(request.requestId, request.attempts);
+    const repairing =
+      change.transport === "ambiguous" && change.by !== undefined && change.error === REPAIR_ERROR;
+    if (change.transport === "queued" || repairing) {
+      // Repair and Retry can both happen while the same reachability check is still pending.
+      if (request.transport === "failed")
+        attemptsBeforeRetry.set(request.requestId, request.attempts);
     } else {
       attemptsBeforeRetry.delete(request.requestId);
     }

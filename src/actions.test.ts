@@ -838,6 +838,7 @@ describe("removal and damaged logs", () => {
     ["bad snapshot", { snapshot: { rev: 1 } }],
     ["bad handler", { handler: { kind: "pull", name: 1 } }],
     ["injected reduced state", { result: { label: "Never handled" } }],
+    ["a click ID that disagrees with the fingerprint", { clickId: "changed-click-id" }],
   ])("sets aside a request record with %s", async (_name, patch) => {
     const hub = await fixture();
     const rev = await board(hub);
@@ -872,7 +873,12 @@ describe("removal and damaged logs", () => {
       const duplicate = {
         ...request,
         requestId: "r-duplicate",
-        ...(kind === "different" ? { click: "different", payload: null } : {}),
+        ...(kind === "different"
+          ? {
+              click: JSON.stringify({ ...JSON.parse(request.click), payload: null }),
+              payload: null,
+            }
+          : {}),
       };
       await appendFile(log, JSON.stringify({ event: "request", request: duplicate }) + "\n");
       const show = () => write(hub, "example/action/show", {});
@@ -906,37 +912,48 @@ describe("removal and damaged logs", () => {
     });
   });
 
-  it("keeps a reachability failure recorded by a worker that read the queue before Retry", async () => {
-    const hub = await fixture((threadCommand) => ({
-      threadEnvironments: { remote: { host: "worker-host", threadCommand } },
-    }));
-    const rev = await board(hub, [DECIDE], { environmentId: "remote", threadId: "far" });
-    await hub.fake.sshUp(false);
-    const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
-    await hub.delivery.runOnce();
-    clock += 60_000;
-    const due = (await states(hub))[0]!;
-    expect(due).toMatchObject({ state: "failed", attempts: 1 });
-    expect((await page(hub, "/api/request", { requestId, choice: "retry" })).status).toBe(200);
-    const recorded = {
-      event: "transport",
-      requestId,
-      transport: "failed",
-      attempts: due.attempts + 1,
-      at: new Date(clock).toISOString(),
-      nextAttemptAt: new Date(clock + 300_000).toISOString(),
-      error: "Cannot reach worker-host over SSH",
-    };
-    await appendFile(
-      join(hub.config.dataRoot, "example", "actions.jsonl"),
-      JSON.stringify(recorded) + "\n",
-    );
-    const shown = await write(hub, "example/action/show", { requestId });
-    expect(shown.value()).toMatchObject({
-      damaged: false,
-      requests: [{ state: "failed", attempts: 2, mayBeDelivered: false }],
-    });
-  });
+  it.each([
+    { repair: false, failures: 1, state: "failed" },
+    { repair: true, failures: 4, state: "stalled" },
+  ])(
+    "keeps a late reachability result ($state, intervening repair: $repair)",
+    async ({ repair, failures, state }) => {
+      const hub = await fixture((threadCommand) => ({
+        threadEnvironments: { remote: { host: "worker-host", threadCommand } },
+      }));
+      const rev = await board(hub, [DECIDE], { environmentId: "remote", threadId: "far" });
+      await hub.fake.sshUp(false);
+      const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+      for (let index = 0; index < failures; index++) {
+        await hub.delivery.runOnce();
+        clock = Date.parse((await states(hub))[0]!.nextAttemptAt!);
+      }
+      const due = (await states(hub))[0]!;
+      expect(due).toMatchObject({ state: "failed", attempts: failures });
+      expect((await page(hub, "/api/request", { requestId, choice: "retry" })).status).toBe(200);
+      const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+      if (repair) {
+        await appendFile(log, '{"event":"transport"');
+        expect((await write(hub, "example/action/repair", {})).value().setAside).toBe(1);
+        expect((await page(hub, "/api/request", { requestId, choice: "retry" })).status).toBe(200);
+      }
+      const recorded = {
+        event: "transport",
+        requestId,
+        transport: state,
+        attempts: due.attempts + 1,
+        at: new Date(clock).toISOString(),
+        nextAttemptAt: state === "stalled" ? null : new Date(clock + 300_000).toISOString(),
+        error: "Cannot reach worker-host over SSH",
+      };
+      await appendFile(log, JSON.stringify(recorded) + "\n");
+      const shown = await write(hub, "example/action/show", { requestId });
+      expect(shown.value()).toMatchObject({
+        damaged: false,
+        requests: [{ state, attempts: failures + 1, mayBeDelivered: false }],
+      });
+    },
+  );
 
   it("skips invalid transitions and fields before repair, including their dependent records", async () => {
     const hub = await fixture();
