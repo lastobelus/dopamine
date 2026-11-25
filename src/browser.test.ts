@@ -453,4 +453,58 @@ describe("page actions", () => {
     expect(posts).toHaveLength(2);
     expect(JSON.parse(posts[0]!).clickId).toBe(JSON.parse(posts[1]!).clickId);
   });
+  it("sends the revision the page rendered, not one whose render failed", async () => {
+    const view: {
+      dopamine?: {
+        subscribe: (callback: (data: { rev: number }) => void, error: () => void) => void;
+        act: (...args: unknown[]) => Promise<unknown>;
+      };
+    } = {};
+    const timers: (() => Promise<void>)[] = [];
+    const posts: string[] = [];
+    let rev = 1;
+    runInNewContext(await readFile(new URL("../web/dopamine.js", import.meta.url), "utf8"), {
+      window: view,
+      parent: view,
+      location: { href: "http://example--workstation.hub.localhost/", search: "", pathname: "/" },
+      URL,
+      URLSearchParams,
+      crypto,
+      history: { pushState() {}, replaceState() {} },
+      addEventListener() {},
+      document: { addEventListener() {} },
+      setTimeout(callback: () => Promise<void>) {
+        timers.push(callback);
+      },
+      clearTimeout() {},
+      async fetch(path: string, options?: { body?: string }) {
+        if (path === "/dopamine-meta.json")
+          return { ok: true, json: async () => ({ shell: "http://hub.localhost/d/x--y" }) };
+        if (path === "/api/act") {
+          posts.push(options!.body!);
+          return { ok: true, status: 202, json: async () => ({ request: { state: "queued" } }) };
+        }
+        if (path === "/api/actions")
+          return { ok: true, status: 200, json: async () => ({ requests: [] }) };
+        const items = { k: { rev } };
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => `"${rev}"` },
+          json: async () => ({ rev, collections: { c: { rev, order: ["k"], items } } }),
+        };
+      },
+    });
+    view.dopamine!.subscribe(
+      (data) => {
+        if (data.rev === 2) throw new Error("Render failed");
+      },
+      () => {},
+    );
+    await setImmediate();
+    rev = 2;
+    await timers.shift()!();
+    await view.dopamine!.act("decide", { collection: "c", key: "k" });
+    expect(JSON.parse(posts[0]!).target.itemRev).toBe(1);
+  });
 });

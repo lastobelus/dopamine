@@ -140,9 +140,11 @@
           }
           if (response.status !== 304) {
             if (!response.ok) throw new Error(`Dashboard refresh failed (${response.status}).`);
-            const data = remember(await response.json());
+            const data = await response.json();
             if (stopped) return;
             if (data.rev !== rev) await callback(data);
+            // Clicks carry the revision the page rendered, so remember it only after rendering.
+            remember(data);
             rev = data.rev;
             etag = response.headers.get("ETag");
           }

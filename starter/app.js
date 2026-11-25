@@ -322,6 +322,12 @@ function render(data) {
   } catch (error) {
     showError(error);
   }
+  await loadMeta();
+  dopamine.subscribe(render, showError);
+  ready = true;
+})();
+/** Reads the manifest, retrying after a failure, then turns on action buttons and requests. */
+async function loadMeta() {
   try {
     const meta = await dopamine.meta();
     document.querySelector("#title").textContent = meta.manifest.title;
@@ -329,19 +335,26 @@ function render(data) {
     manifest = meta.manifest;
   } catch (error) {
     showError(error);
+    setTimeout(() => void loadMeta(), 5000);
+    return;
   }
-  dopamine.subscribe(render, showError);
-  if (manifest?.actions?.length)
-    dopamine.watchRequests((requests) => {
-      latestRequests = requests;
-      requestsByItem.clear();
-      for (const request of requests) {
-        const stable = JSON.stringify([request.target.collection, request.target.key]);
-        requestsByItem.set(stable, [...(requestsByItem.get(stable) ?? []), request]);
-      }
-      for (const stable of requestBoxes.keys()) drawRequests(stable);
-      drawOtherRequests();
-    }, showError);
-  ready = true;
-})();
+  if (!manifest.actions?.length) return;
+  if (current) {
+    // Cards drawn before the manifest arrived have no buttons; draw them again.
+    const data = current;
+    current = { ...data, rev: Number.NaN };
+    for (const card of cards.values()) card.dataset.rev = "";
+    render(data);
+  }
+  dopamine.watchRequests((requests) => {
+    latestRequests = requests;
+    requestsByItem.clear();
+    for (const request of requests) {
+      const stable = JSON.stringify([request.target.collection, request.target.key]);
+      requestsByItem.set(stable, [...(requestsByItem.get(stable) ?? []), request]);
+    }
+    for (const stable of requestBoxes.keys()) drawRequests(stable);
+    drawOtherRequests();
+  }, showError);
+}
 addEventListener("scroll", save, { passive: true });

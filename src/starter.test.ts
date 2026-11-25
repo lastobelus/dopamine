@@ -55,6 +55,7 @@ class Element {
 async function page(
   dopamine: Record<string, unknown> = {},
   meta: unknown = { manifest: { title: "Example" } },
+  timers: (() => void)[] = [],
 ) {
   const nodes = Object.fromEntries(
     ["collections", "title", "updated", "error", "empty"].map((id) => [id, new Element("div")]),
@@ -76,7 +77,7 @@ async function page(
     location: { href: "http://example--workstation.hub.localhost/" },
     URL,
     Intl,
-    setTimeout() {},
+    setTimeout: (callback: () => void) => timers.push(callback),
     clearTimeout() {},
     dopamine: {
       view: { get: async () => ({}), set: async () => ({}) },
@@ -269,5 +270,37 @@ describe("starter rendering", () => {
     expect(root.all().some((node) => node.tag === "a" && node.textContent === "Shipped")).toBe(
       false,
     );
+  });
+  it("adds action buttons once metadata loads after a failure", async () => {
+    const timers: (() => void)[] = [];
+    let fail = true;
+    const { render, root } = await page(
+      {
+        meta: async () => {
+          if (fail) throw new Error("Dashboard request failed (503).");
+          return {
+            manifest: {
+              title: "Example",
+              collections: {},
+              actions: [{ name: "go", label: "Go", collections: ["rows"], scope: "item" }],
+            },
+          };
+        },
+        watchRequests() {},
+      },
+      undefined,
+      timers,
+    );
+    render({
+      rev: 1,
+      collections: { rows: { rev: 1, order: ["a"], items: { a: item(1, { title: "Row" }) } } },
+    });
+    const buttons = () =>
+      root.all().filter((node) => node.tag === "button" && node.textContent === "Go");
+    expect(buttons()).toHaveLength(0);
+    fail = false;
+    timers.shift()!();
+    await setImmediate();
+    expect(buttons()).toHaveLength(1);
   });
 });
