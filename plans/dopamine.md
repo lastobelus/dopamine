@@ -214,7 +214,7 @@ Built in [lastCode#852](https://github.com/lastobelus/lastCode/pull/852), merged
 - **Agent opens were left unchanged.** `preview_open({purpose: "user"})` still always makes a new tab. Changing it would touch the server browser, the preview MCP handler, the contract and the tool text agents read. The dashboard skill's `preview_status` check, plus link reuse, covers the need, as this section allowed.
 - **[+] → Dashboards picks the most recently updated hub tab,** not the most recently selected one.
 - **Only foreground opens reuse a tab:** links in chat, links a page opens in a new tab, terminal links and file previews. For loopback and `*.localhost` addresses the match ignores the query but needs the same origin, path and fragment. Cmd-click and Actions that open a page by themselves still make a new tab.
-- **Follow-ups:** with several hub tabs open, [+] → Dashboards should pick the one selected most recently; and a page's own new-window link to its own path with a different query matches its own tab, so the click does nothing (Cmd-click works around it).
+- **Follow-ups:** with several hub tabs open, [+] → Dashboards should pick the one selected most recently; and on a loopback or `*.localhost` origin, a page's own new-window link to its own path with a different query matches its own tab, so the click does nothing (Cmd-click works around it).
 
 **Observed so far,** in an isolated LastCode dev instance against a live hub: [+] → Dashboards revealed a tab that had moved from the index to a dashboard; a terminal link with a different query revealed the open tab; a different path and a different profile opened new tabs. Unit tests cover the matching rules. Cmd-click and in-page links in the desktop app were not tried live.
 
