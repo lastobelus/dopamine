@@ -30,6 +30,8 @@ The CLI uses `T3CODE_THREAD_ID` only when `T3CODE_HOME` exactly matches `adapter
 
 The `threadCommand` is a command and argument array for a LastCode-style thread CLI, such as `lastcode-thread`. The hub appends `read <threadId> --json` to read thread state and `send <threadId> - --json` to deliver an action, with the message on stdin. The adapter's own environment uses `adapter.threadCommand` unless `threadEnvironments` names it. With `host`, the hub runs the command over SSH (`BatchMode=yes`, `ConnectTimeout=5`) on that host, so it needs key-based, non-interactive SSH to it; a leading `~/` in the command is left for the remote shell to expand.
 
+The hub reads owner state for the index and shell through local thread commands. An owner environment configured with `host` has `ownerState: "unknown"` in these views. A successful read with `{"thread":{"archived":true}}` or `{"archived":true}` makes the views show “thread archived” and marks page dashboards stale. The hub treats replies with `kind: "not-found"` or `kind: "ambiguous"` as `ownerState: "missing"` before checking the archive flag. LastCode's `lastcode-thread read` returns `kind: "not-found"` for both archived and absent threads. Its active-thread list also omits archived threads.
+
 The optional `projectIconCommand` is a command and argument array. The owning hub appends the project ID from its thread adapter and `--json`. The command returns JSON `null` or `{mediaType, base64}` with a browser-compatible image of at most 128 KiB. The index serves the image through the hub and uses initials when it cannot load it.
 
 ## Data
@@ -123,7 +125,7 @@ A dashboard's own hub keeps its action requests in `actions.jsonl` beside its da
 1. Returns the existing request for a known `clickId` whose click is identical, field for field; the same ID with a different click is refused (409).
 2. Checks that the action is declared for that collection and scope, and that the target still has the given revision (409 "This changed; look again").
 3. Checks the payload against `maxPayloadBytes` (413). On a `questions` collection, a payload `answer` must be one of the item's option labels.
-4. Checks that the handler can take work. A thread handler's environment must be configured, and the thread CLI must read the thread as existing and not archived (it reports an archived thread as `not-found`). If SSH cannot reach the handler's machine, the click is accepted and delivery retries it. A pull handler always can take work.
+4. Checks that the handler can take work. A thread handler's environment must be configured and the thread CLI must report the thread as available. An explicit archive or a `not-found` reply makes the handler unavailable. If SSH cannot reach the handler's machine, the click is accepted and delivery retries it. A pull handler always can take work.
 5. Applies `oncePerItem` (409 with `duplicateOf`).
 6. Records the request with a snapshot of the item (`{rev, value}`) or collection (`{rev, order}`), and the dashboard's handler at that moment.
 

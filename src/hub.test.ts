@@ -368,6 +368,38 @@ describe("hub HTTP boundaries", () => {
       title: "Example project",
     });
   });
+  it("keeps an explicit owner archive distinct from a LastCode not-found reply", async () => {
+    const hub = await fixture({
+      adapter: await fakeAdapter("environment", {
+        archived: { thread: { archived: true } },
+        missing: { kind: "not-found", environmentId: "environment", identifier: "missing" },
+      }),
+    });
+    for (const id of ["archived", "missing"]) {
+      await hub.store.create({
+        id,
+        title: id,
+        owner: { environmentId: "environment", threadId: id },
+        staleAfterMinutes: 0,
+      });
+    }
+
+    const states = {
+      archived: { ownerState: "archived", status: "stale" },
+      missing: { ownerState: "missing", status: "fresh" },
+    };
+    const index = (await send(hub, "/api/index")).value();
+    expect(index.dashboards).toEqual(
+      expect.arrayContaining(
+        Object.entries(states).map(([id, state]) =>
+          expect.objectContaining({ key: `${id}--workstation`, ...state }),
+        ),
+      ),
+    );
+    for (const [id, state] of Object.entries(states)) {
+      expect((await send(hub, `/api/shell/${id}--workstation`)).value()).toMatchObject(state);
+    }
+  });
   it("serves a project icon from the owning hub without exposing adapter details", async () => {
     const svg =
       '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M0 0h16v16H0z"/></svg>';

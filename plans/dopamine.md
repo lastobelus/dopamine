@@ -91,7 +91,7 @@ Only the hub writes dashboard files, one in-process lock per dashboard, with tem
 - **Open directly** reloads the dashboard outside the shell (`?dopamine-direct=1` for a page dashboard), for the element picker or anything the frame blocks. The picker cannot reach into a cross-origin frame, so it selects the whole frame inside the shell.
 - **Dashboard origins** serve only their own files, `data.json` (with `ETag`), `/dopamine.js`, attachments and `/api/view`. No path reaches another dashboard or the control routes. State changes need the exact dashboard `Origin`. Page responses carry a strict content security policy: no runtime CDN loads, `frame-ancestors` limited to the viewing origin. A top-level load of a dashboard origin redirects into its shell.
 - **The peer proxy.** The viewing hub reverse-proxies peer dashboards' origins, discards incoming forwarding headers, derives the key from the validated `Host`, adds the peer credential, and never forwards the write API.
-- **Freshness.** A page dashboard is stale after `staleAfterMinutes` without a write; a `url` dashboard shows reachable or unreachable from a short probe; an archived owner thread shows "thread archived".
+- **Freshness.** A page dashboard is stale after `staleAfterMinutes` without a write or when a local thread adapter reports the owner as archived. A `url` dashboard shows reachable or unreachable from a short probe. The index and shell show "thread archived" when the owning hub's local thread command confirms an archive. Owner lookups configured over SSH have unknown state in these views. LastCode's `lastcode-thread read` currently reports archived and absent threads as `not-found`. Showing the badge through that command requires a successful read result with `archived: true` for the exact archived ID. The hub treats `not-found` and `ambiguous` replies as missing even when they contain an archive flag.
 
 ### Pages
 
@@ -238,7 +238,7 @@ A pinned dashboard tab stays in the panel as the reader switches threads: closed
 - **Agent-written pages on per-dashboard origins are the main path**; the starter is optional.
 - **Generic records plus declared types**, starting with `questions` only.
 - **Inline or dopamine is decided by lifetime**; write a page once, then post only data.
-- **Dashboards outlive their threads**, shown as "thread archived" and stale until removed.
+- **Dashboards outlive their threads.** When the owning hub's local thread adapter confirms an archive, the dashboard shows "thread archived" and a page dashboard is stale.
 - **No floating views.**
 - **Ambiguous deliveries are never resent automatically**; a claim makes handling at most once. Clicks are never described as running exactly once.
 
