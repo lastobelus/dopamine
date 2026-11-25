@@ -230,9 +230,15 @@
           const result = await window.dopamine.requests();
           const text = JSON.stringify(result);
           busy = result.requests.some((entry) =>
-            ["awaiting-confirmation", "queued", "sending", "failed", "claimed"].includes(
-              entry.state,
-            ),
+            [
+              "awaiting-confirmation",
+              "queued",
+              "sending",
+              "delivered",
+              "failed",
+              "claimed",
+              "unresolved",
+            ].includes(entry.state),
           );
           if (!stopped && text !== last) {
             last = text;
