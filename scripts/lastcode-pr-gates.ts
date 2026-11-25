@@ -138,10 +138,11 @@ export function evaluateReview(
           .find((line) => line.startsWith("|") && line.includes("**Code Review**"));
         const completed = row?.match(/\*\*Completed\*\*\s*<relative-time datetime="([^"]+)"/u)?.[1];
         const completedAt = timestamp(completed);
+        // GitHub's updated_at has whole-second precision; the lifecycle time has fractions.
         const at =
           state.status === "completed" &&
           completedAt >= timestamp(comment.created_at) &&
-          completedAt <= timestamp(comment.updated_at)
+          completedAt < timestamp(comment.updated_at) + 1000
             ? completedAt
             : timestamp(comment.created_at);
         artifacts.push({ at, id: comment.id, verdict });
