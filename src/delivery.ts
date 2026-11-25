@@ -6,11 +6,11 @@ import { isPull } from "./model.ts";
 import type { ThreadReference } from "./model.ts";
 import { threadEnvironment } from "./config.ts";
 import type { HubConfig, ThreadEnvironment } from "./config.ts";
+import { MAX_DELIVERY_ATTEMPTS } from "./actions.ts";
 import type { ActionRequest, ActionStore } from "./actions.ts";
 
 /** Waits after the first four failed attempts; the fifth stalls until Retry or Abandon. */
 const RETRY_DELAYS_MS = [60_000, 300_000, 900_000, 3_600_000];
-const MAX_ATTEMPTS = 5;
 const OUTPUT_LIMIT = 1024 * 1024;
 
 export interface DeliveryOptions {
@@ -189,7 +189,7 @@ export class Delivery {
 
   private async fail(id: string, request: ActionRequest, error: string): Promise<void> {
     const attempts = request.attempts + 1;
-    const stalled = attempts >= MAX_ATTEMPTS;
+    const stalled = attempts >= MAX_DELIVERY_ATTEMPTS;
     await this.actions.recordTransport(id, request.requestId, ["queued", "failed"], {
       transport: stalled ? "stalled" : "failed",
       attempts,

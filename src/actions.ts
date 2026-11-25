@@ -105,6 +105,7 @@ const LOG = "actions.jsonl";
 /** A claim with no ack after this long shows as unresolved. */
 const UNRESOLVED_MS = 30 * 60 * 1000;
 const LEASE_MS = 5 * 60 * 1000;
+export const MAX_DELIVERY_ATTEMPTS = 5;
 const REPAIR_ERROR = "Action log was repaired; check before retrying";
 const REPAIRABLE_TRANSPORTS = new Set<Transport>(["queued", "sending", "failed", "delivered"]);
 
@@ -225,7 +226,11 @@ function readRequest(value: unknown): RequestEvent["request"] {
   return request as unknown as RequestEvent["request"];
 }
 
-function canApplyTransport(request: ActionRequest, event: TransportEvent): boolean {
+function canApplyTransport(
+  request: ActionRequest,
+  event: TransportEvent,
+  attemptsBeforeRetry: number | undefined,
+): boolean {
   const { transport: from, handling } = request;
   const unclaimed = handling === "unclaimed";
   const pull = isPull(request.handler);
@@ -240,17 +245,28 @@ function canApplyTransport(request: ActionRequest, event: TransportEvent): boole
         event.error === null
       );
     case "sending":
-      return unclaimed && !pull && ["queued", "failed"].includes(from) && !!event.attempts;
+      return (
+        unclaimed &&
+        !pull &&
+        ["queued", "failed"].includes(from) &&
+        event.attempts === request.attempts + 1
+      );
     case "failed":
-    case "stalled":
-      // A reachability check may finish after a late claim on a retried request.
+    case "stalled": {
+      const { attempts } = event;
+      // A reachability check may finish after a late claim or after Retry reset the budget.
       return (
         !pull &&
         ["queued", "failed"].includes(from) &&
-        !!event.attempts &&
+        attempts !== undefined &&
+        (attempts === request.attempts + 1 ||
+          (attemptsBeforeRetry !== undefined && attempts === attemptsBeforeRetry + 1)) &&
         typeof event.error === "string" &&
-        (event.transport === "failed" ? logDate(event.nextAttemptAt) : event.nextAttemptAt === null)
+        (event.transport === "failed"
+          ? attempts < MAX_DELIVERY_ATTEMPTS && logDate(event.nextAttemptAt)
+          : attempts === MAX_DELIVERY_ATTEMPTS && event.nextAttemptAt === null)
       );
+    }
     case "delivered":
       if (!pull) return from === "sending" && event.receipt !== undefined;
       return (
@@ -297,12 +313,13 @@ function canApplyHandling(request: ActionRequest, event: HandlingEvent): boolean
   }
 }
 
-function apply(requests: Map<string, ActionRequest>, raw: unknown): void {
+function apply({ requests, clicks, attemptsBeforeRetry }: Log, raw: unknown): void {
   const event = object(raw, "Log event");
   if (event.event === "request") {
     logFields(event, "event", "request");
     const request = readRequest(event.request);
     if (requests.has(request.requestId)) throw new Error("Duplicate request ID");
+    if (clicks.has(request.clickId)) throw new Error("Duplicate click ID");
     // Run again is one record: the new request closes the one it reruns.
     const rerun = request.rerunOf === undefined ? undefined : requests.get(request.rerunOf);
     if (request.rerunOf !== undefined) {
@@ -327,6 +344,7 @@ function apply(requests: Map<string, ActionRequest>, raw: unknown): void {
       attempts: 0,
       updatedAt: request.at,
     });
+    clicks.set(request.clickId, request.requestId);
     if (rerun)
       Object.assign(rerun, {
         handling: "abandoned",
@@ -376,7 +394,17 @@ function apply(requests: Map<string, ActionRequest>, raw: unknown): void {
         throw new Error("Invalid delivery receipt");
     }
     const change = event as unknown as TransportEvent;
-    if (!canApplyTransport(request, change)) throw new Error("Invalid transport transition");
+    if (!canApplyTransport(request, change, attemptsBeforeRetry.get(request.requestId)))
+      throw new Error("Invalid transport transition");
+    if (
+      change.transport === "queued" &&
+      (request.transport === "failed" ||
+        (request.transport === "ambiguous" && request.error === REPAIR_ERROR))
+    ) {
+      attemptsBeforeRetry.set(request.requestId, request.attempts);
+    } else {
+      attemptsBeforeRetry.delete(request.requestId);
+    }
     request.updatedAt = change.at;
     request.transport = change.transport;
     if (change.transport === "sending" || change.leaseUntil) request.mayBeDelivered = true;
@@ -417,9 +445,14 @@ function apply(requests: Map<string, ActionRequest>, raw: unknown): void {
 
 interface Log {
   requests: Map<string, ActionRequest>;
+  clicks: Map<string, string>;
+  attemptsBeforeRetry: Map<string, number>;
   damaged: boolean;
 }
 
+function emptyLog(): Log {
+  return { requests: new Map(), clicks: new Map(), attemptsBeforeRetry: new Map(), damaged: false };
+}
 async function readBytes(path: string): Promise<Buffer> {
   try {
     const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -438,17 +471,16 @@ async function readBytes(path: string): Promise<Buffer> {
 async function readLog(directory: string): Promise<Log> {
   const bytes = await readBytes(join(directory, LOG));
   const end = bytes.lastIndexOf(10) + 1;
-  const requests = new Map<string, ActionRequest>();
-  let damaged = false;
+  const log = emptyLog();
   for (const line of bytes.subarray(0, end).toString("utf8").split("\n")) {
     if (!line) continue;
     try {
-      apply(requests, JSON.parse(line));
+      apply(log, JSON.parse(line));
     } catch {
-      damaged = true;
+      log.damaged = true;
     }
   }
-  return { requests, damaged };
+  return log;
 }
 
 async function syncDirectory(path: string): Promise<void> {
@@ -651,8 +683,10 @@ export class ActionStore {
     return await this.store.exclusive(id, async () => {
       const directory = join(this.store.root, id);
       const record = await this.store.current(id);
-      const { requests } = await prepareAppend(directory);
-      const previous = [...requests.values()].find((request) => request.clickId === clickId);
+      const log = await prepareAppend(directory);
+      const { requests, clicks } = log;
+      const previousId = clicks.get(clickId);
+      const previous = previousId === undefined ? undefined : requests.get(previousId);
       if (previous) {
         if (previous.click !== fingerprint)
           throw new HttpError(409, "This click ID was already used for a different click");
@@ -719,7 +753,7 @@ export class ActionStore {
         transport: action.confirm ? "awaiting-confirmation" : "queued",
       };
       const event: RequestEvent = { event: "request", request };
-      apply(requests, event);
+      apply(log, event);
       await append(directory, [event]);
       return { request: requests.get(request.requestId)!, existing: false };
     });
@@ -870,11 +904,11 @@ export class ActionStore {
     return await this.store.exclusive(id, async () => {
       const located = await this.locate(id, requestId);
       if (options.live && !located.live) throw new HttpError(404, "Dashboard was removed");
-      const { requests } = await prepareAppend(located.directory);
-      const request = requests.get(requestId);
+      const log = await prepareAppend(located.directory);
+      const request = log.requests.get(requestId);
       if (!request) throw new HttpError(404, "Action request not found");
       const changes = events(request, this.at());
-      for (const change of changes) apply(requests, change);
+      for (const change of changes) apply(log, change);
       await append(located.directory, changes);
       return request;
     });
@@ -980,15 +1014,13 @@ export class ActionStore {
       const bytes = await readBytes(path);
       const end = bytes.lastIndexOf(10) + 1;
       const tail = bytes.subarray(end);
-      let requests = new Map<string, ActionRequest>();
+      const log = emptyLog();
       const kept: string[] = [];
       const damaged: string[] = [];
       for (const line of bytes.subarray(0, end).toString("utf8").split("\n")) {
         if (!line) continue;
         try {
-          const trial = structuredClone(requests);
-          apply(trial, JSON.parse(line));
-          requests = trial;
+          apply(log, JSON.parse(line));
           kept.push(line);
         } catch {
           damaged.push(line);
@@ -1005,7 +1037,7 @@ export class ActionStore {
       // Make the saved records durable before replacing the original log.
       await syncDirectory(directory);
       const at = this.at();
-      const recovered = [...requests.values()]
+      const recovered = [...log.requests.values()]
         .filter(
           (request) =>
             request.handling === "unclaimed" && REPAIRABLE_TRANSPORTS.has(request.transport),

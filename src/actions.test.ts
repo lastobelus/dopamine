@@ -837,7 +837,7 @@ describe("removal and damaged logs", () => {
     ["bad target revision", { target: { collection: "needs", key: "one", itemRev: "1" } }],
     ["bad snapshot", { snapshot: { rev: 1 } }],
     ["bad handler", { handler: { kind: "pull", name: 1 } }],
-    ["injected reduced state", { mayBeDelivered: true }],
+    ["injected reduced state", { result: { label: "Never handled" } }],
   ])("sets aside a request record with %s", async (_name, patch) => {
     const hub = await fixture();
     const rev = await board(hub);
@@ -858,6 +858,83 @@ describe("removal and damaged logs", () => {
     expect((await write(hub, "example/action/show", {})).value()).toEqual({
       requests: [],
       damaged: false,
+    });
+  });
+
+  it.each(["identical", "different"])(
+    "rejects duplicate click IDs with %s contents",
+    async (kind) => {
+      const hub = await fixture();
+      const rev = await board(hub);
+      const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+      const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+      const { request } = JSON.parse(await readFile(log, "utf8"));
+      const duplicate = {
+        ...request,
+        requestId: "r-duplicate",
+        ...(kind === "different" ? { click: "different", payload: null } : {}),
+      };
+      await appendFile(log, JSON.stringify({ event: "request", request: duplicate }) + "\n");
+      const show = () => write(hub, "example/action/show", {});
+      expect((await show()).value()).toMatchObject({ damaged: true, requests: [{ requestId }] });
+      expect((await write(hub, "example/action/repair", {})).value()).toEqual({
+        kept: 1,
+        setAside: 1,
+      });
+      expect((await show()).value()).toMatchObject({
+        damaged: false,
+        requests: [{ requestId, state: "ambiguous" }],
+      });
+    },
+  );
+
+  it.each([
+    { transport: "sending", attempts: 2 },
+    { transport: "failed", attempts: 2, nextAttemptAt: "2026-11-21T20:00:00.000Z", error: "SSH" },
+    { transport: "stalled", attempts: 1, nextAttemptAt: null, error: "SSH" },
+  ])("rejects impossible attempt counts for $transport", async (fields) => {
+    const hub = await fixture();
+    const rev = await board(hub);
+    const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+    const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+    const event = { event: "transport", requestId, at: new Date(clock).toISOString(), ...fields };
+    await appendFile(log, JSON.stringify(event) + "\n");
+    const shown = await write(hub, "example/action/show", { requestId });
+    expect(shown.value()).toMatchObject({
+      damaged: true,
+      requests: [{ requestId, state: "queued", attempts: 0, mayBeDelivered: false }],
+    });
+  });
+
+  it("keeps a reachability failure recorded by a worker that read the queue before Retry", async () => {
+    const hub = await fixture((threadCommand) => ({
+      threadEnvironments: { remote: { host: "worker-host", threadCommand } },
+    }));
+    const rev = await board(hub, [DECIDE], { environmentId: "remote", threadId: "far" });
+    await hub.fake.sshUp(false);
+    const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+    await hub.delivery.runOnce();
+    clock += 60_000;
+    const due = (await states(hub))[0]!;
+    expect(due).toMatchObject({ state: "failed", attempts: 1 });
+    expect((await page(hub, "/api/request", { requestId, choice: "retry" })).status).toBe(200);
+    const recorded = {
+      event: "transport",
+      requestId,
+      transport: "failed",
+      attempts: due.attempts + 1,
+      at: new Date(clock).toISOString(),
+      nextAttemptAt: new Date(clock + 300_000).toISOString(),
+      error: "Cannot reach worker-host over SSH",
+    };
+    await appendFile(
+      join(hub.config.dataRoot, "example", "actions.jsonl"),
+      JSON.stringify(recorded) + "\n",
+    );
+    const shown = await write(hub, "example/action/show", { requestId });
+    expect(shown.value()).toMatchObject({
+      damaged: false,
+      requests: [{ state: "failed", attempts: 2, mayBeDelivered: false }],
     });
   });
 
