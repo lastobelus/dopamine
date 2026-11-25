@@ -220,7 +220,7 @@ describe("starter rendering", () => {
     expect(acted).toEqual([
       [
         "decide",
-        { collection: "needs", key: "q1" },
+        { collection: "needs", key: "q1", itemRev: 4 },
         { answer: "<b>No</b>" },
         { confirmDuplicate: false },
       ],

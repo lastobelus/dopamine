@@ -504,7 +504,25 @@ describe("page actions", () => {
     await setImmediate();
     rev = 2;
     await timers.shift()!();
+    // Data fetched but not rendered does not change what a click carries either.
+    await (view.dopamine as unknown as { data: () => Promise<unknown> }).data();
     await view.dopamine!.act("decide", { collection: "c", key: "k" });
     expect(JSON.parse(posts[0]!).target.itemRev).toBe(1);
+    // A request list that failed to draw is drawn again on the next poll.
+    let draws = 0;
+    (
+      view.dopamine as unknown as {
+        watchRequests: (callback: () => void, error: () => void) => void;
+      }
+    ).watchRequests(
+      () => {
+        draws++;
+        if (draws === 1) throw new Error("Draw failed");
+      },
+      () => {},
+    );
+    await setImmediate();
+    await timers.at(-1)!();
+    expect(draws).toBe(2);
   });
 });

@@ -149,24 +149,28 @@ function drawOtherRequests() {
   otherRequests.hidden = rows.length === 0;
   otherRequests.children[1].replaceChildren(...rows);
 }
-async function act(action, collection, key, payload, confirmDuplicate = false) {
+async function act(action, collection, key, itemRev, payload, confirmDuplicate = false) {
   const stable = JSON.stringify([collection, key]);
   notices.delete(stable);
   try {
-    await dopamine.act(action.name, { collection, key }, payload, { confirmDuplicate });
+    // The revision this card drew, so a click on a changed item is refused.
+    await dopamine.act(action.name, { collection, key, itemRev }, payload, { confirmDuplicate });
   } catch (error) {
     const notice = el("div", error.message, "request notice");
     if (error.duplicateOf) {
       const again = el("button", "Send again");
       again.type = "button";
-      again.addEventListener("click", () => void act(action, collection, key, payload, true));
+      again.addEventListener(
+        "click",
+        () => void act(action, collection, key, itemRev, payload, true),
+      );
       notice.append(again);
     }
     notices.set(stable, notice);
   }
   drawRequests(stable);
 }
-function actionControls(name, key, record) {
+function actionControls(name, key, itemRev, record) {
   const declared = (manifest?.actions ?? []).filter(
     (action) => action.scope === "item" && action.collections.includes(name),
   );
@@ -183,7 +187,7 @@ function actionControls(name, key, record) {
       button.type = "button";
       button.addEventListener(
         "click",
-        () => void act(action, name, key, answer === null ? null : { answer }),
+        () => void act(action, name, key, itemRev, answer === null ? null : { answer }),
       );
       buttons.append(button);
     }
@@ -284,7 +288,7 @@ function render(data) {
         }
       }
       content.append(el("small", `${item.by} · ${when(item.at)}`));
-      content.append(...actionControls(name, key, record));
+      content.append(...actionControls(name, key, item.rev, record));
       card.replaceChildren(content);
       drawRequests(stable);
       card.dataset.rev = String(item.rev);

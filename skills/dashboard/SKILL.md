@@ -91,7 +91,7 @@ Offer a button when the reader's click should start work in a thread, such as an
 
    Set `confirm` for anything consequential: the reader then confirms in a box the shell draws, which the page cannot fake. Set `oncePerItem` when a second click on the same item would duplicate work.
 
-2. On the page, call `dopamine.act(action, {collection, key}, payload)` from the button's click handler. It checks the click against the data the page last loaded, so a changed item is refused with "This changed; look again". The starter page already shows a button for each declared item action, one per option on a `questions` item, with the answer as `{answer: "<label>"}`.
+2. On the page, call `dopamine.act(action, {collection, key}, payload)` from the button's click handler. Pass the revision the button was drawn from as `itemRev` (or `collectionRev`); without it, `act()` uses the last revision a `dopamine.subscribe` callback rendered. A click on a changed item is refused with "This changed; look again". The starter page already shows a button for each declared item action, one per option on a `questions` item, with the answer as `{answer: "<label>"}`.
 
 3. Show each request's state with `dopamine.watchRequests(callback)`, and offer the reader's choices with `dopamine.choose(requestId, choice)`: Retry and Abandon when a request is `ambiguous` or `stalled`, and Mark done, Run again and Abandon when it is `unknown`. Show `result.label` (linked to `result.href`) when it is `done`.
 

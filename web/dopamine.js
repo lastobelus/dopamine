@@ -124,7 +124,7 @@
     }
   });
   window.dopamine = {
-    data: () => request("/data.json").then(remember),
+    data: () => request("/data.json"),
     subscribe(callback, onError = () => {}) {
       let etag,
         rev,
@@ -244,8 +244,8 @@
             ].includes(entry.state),
           );
           if (!stopped && text !== last) {
-            last = text;
             await callback(result.requests);
+            last = text;
           }
         } catch (error) {
           if (!stopped) onError(error);

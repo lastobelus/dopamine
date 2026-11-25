@@ -581,7 +581,11 @@ describe("delivering", () => {
     // The handler finds no evidence it ran and says so; the reader chooses what happens next.
     await write(hub, "example/action/ack", { requestId, status: "unknown" });
     expect((await states(hub))[0]!.state).toBe("unknown");
+    const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+    const before = (await readFile(log, "utf8")).split("\n").length;
     const rerun = await page(hub, "/api/request", { requestId, choice: "run-again" });
+    // One record both closes the old request and opens the new one, so a crash cannot split them.
+    expect((await readFile(log, "utf8")).split("\n").length).toBe(before + 1);
     expect(rerun.value().request).toMatchObject({ state: "queued", rerunOf: requestId });
     const after = await states(hub);
     expect(after.find((entry) => entry.requestId === requestId)!.state).toBe("abandoned");

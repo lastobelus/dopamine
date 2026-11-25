@@ -98,7 +98,6 @@ interface HandlingEvent {
   at: string;
   by: string;
   result?: ActionResult;
-  rerunAs?: string;
 }
 type LogEvent = RequestEvent | TransportEvent | HandlingEvent;
 
@@ -180,6 +179,10 @@ function apply(requests: Map<string, ActionRequest>, raw: unknown): void {
       !["queued", "awaiting-confirmation"].includes(request.transport)
     )
       throw new Error("Invalid request record");
+    // Run again is one record: the new request closes the one it reruns.
+    const rerun = request.rerunOf === undefined ? undefined : requests.get(request.rerunOf);
+    if (request.rerunOf !== undefined && rerun?.handling !== "unknown")
+      throw new Error("Invalid rerun record");
     requests.set(request.requestId, {
       ...request,
       mayBeDelivered: false,
@@ -187,6 +190,12 @@ function apply(requests: Map<string, ActionRequest>, raw: unknown): void {
       attempts: 0,
       updatedAt: request.at,
     });
+    if (rerun)
+      Object.assign(rerun, {
+        handling: "abandoned",
+        rerunAs: request.requestId,
+        updatedAt: request.at,
+      });
     return;
   }
   const request = requests.get(event.requestId);
@@ -213,7 +222,6 @@ function apply(requests: Map<string, ActionRequest>, raw: unknown): void {
       request.claimedAt = event.at;
     }
     if (event.result) request.result = event.result;
-    if (event.rerunAs) request.rerunAs = event.rerunAs;
     return;
   }
   throw new Error("Unknown log event");
@@ -656,10 +664,7 @@ export class ActionStore {
             rerunOf: requestId,
             transport: request.confirm ? "awaiting-confirmation" : "queued",
           };
-          return [
-            { event: "handling", requestId, handling: "abandoned", at, by, rerunAs: newId },
-            { event: "request", request: rerun },
-          ];
+          return [{ event: "request", request: rerun }];
         }
         default:
           throw new HttpError(400, "Choice must be retry, abandon, mark-done or run-again");
