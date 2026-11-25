@@ -1,6 +1,6 @@
 # Dopamine
 
-**Status:** In Progress. Phase 1a is built and deployed; its acceptance checks are partly observed (see "Phase 1a is done when"). Phase 1b (actions) is built and tested; its acceptance checks wait for a deployed installation (see "Phase 1b is done when"). Phase 2 (a LastCode change) is built; an installation gets it with its next LastCode build. Phase 3 is decided after a week of real use.
+**Status:** In Progress. Phase 1a is built and deployed; all its acceptance checks except the reboot have been observed (see "Phase 1a is done when"). Phase 1b (actions) is built and tested; its acceptance checks wait for a deployed installation (see "Phase 1b is done when"). Phase 2 (a LastCode change) is built; an installation gets it with its next LastCode build. Phase 3 is decided after a week of real use.
 
 This plan describes dopamine itself, for anyone running it with LastCode or T3 Code across more than one environment. It never names a particular installation. A specific installation keeps its own private plan: which machines, ports, service files and tunnels it uses, and which of the acceptance checks below it has observed.
 
@@ -117,7 +117,7 @@ Observed on an installation with a desktop machine and one peer machine, not inf
 8. A disclosure stays open and the page does not scroll across an update; opening the dashboard beside a thread on the other machine restores the open disclosure.
 9. All tests pass.
 
-**Observed so far on the reference installation (Nov 23):** 5 (posted from both machines within 139 ms, by `dash` from one thread), 6 (removed from the index, restored with its data), 9 (94 tests). The rest need a person at the desktop or a reboot. Each installation records its own observations in its private plan.
+**Observed so far on the reference installation (Nov 23–25):** 2; 3, except a thread link from a page dashboard and from Open directly; 4; 5 (threads on each machine posted at the same second, both entries kept, 455 ms apart); 6 (removed from the index, restored with its data); 7; 8; 9. Still open: 1, which needs a reboot of each machine. Each installation records its own observations in its private plan.
 
 ## Phase 1b: actions ✅ built
 
@@ -212,9 +212,9 @@ Made from a thread in the LastCode project and merged only through its own merge
 Built in [lastCode#852](https://github.com/lastobelus/lastCode/pull/852), merged Nov 24.
 
 - **Agent opens were left unchanged.** `preview_open({purpose: "user"})` still always makes a new tab. Changing it would touch the server browser, the preview MCP handler, the contract and the tool text agents read. The dashboard skill's `preview_status` check, plus link reuse, covers the need, as this section allowed.
-- **[+] → Dashboards picks the most recently updated hub tab,** not the most recently selected one.
+- **[+] → Dashboards first picked the most recently updated hub tab.** [lastCode#860](https://github.com/lastobelus/lastCode/pull/860) changed it to the most recently selected one, as designed.
 - **Only foreground opens reuse a tab:** links in chat, links a page opens in a new tab, terminal links and file previews. For loopback and `*.localhost` addresses the match ignores the query but needs the same origin, path and fragment. Cmd-click and Actions that open a page by themselves still make a new tab.
-- **Follow-ups:** with several hub tabs open, [+] → Dashboards should pick the one selected most recently; and on a loopback or `*.localhost` origin, a page's own new-window link to its own path with a different query matches its own tab, so the click does nothing (Cmd-click works around it).
+- **A page's link to itself:** on a loopback or `*.localhost` origin, a page's own new-window link to its own path with a different query first matched its own tab, so the click did nothing. [lastCode#861](https://github.com/lastobelus/lastCode/pull/861) makes such a link skip its source tab: it reveals another matching tab or opens a new one.
 
 **Observed so far,** in an isolated LastCode dev instance against a live hub: [+] → Dashboards revealed a tab that had moved from the index to a dashboard; a terminal link with a different query revealed the open tab; a different path and a different profile opened new tabs. Unit tests cover the matching rules. Cmd-click and in-page links in the desktop app were not tried live.
 
