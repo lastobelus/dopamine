@@ -67,11 +67,15 @@ process.stdout.write(JSON.stringify({ kind: "accepted", environmentId: "${ENVIRO
   await writeFile(
     ssh,
     `#!${process.execPath}
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 const here = ${JSON.stringify(directory)};
 const command = process.argv.at(-1);
 appendFileSync(here + "/ssh.jsonl", JSON.stringify(process.argv.slice(2)) + "\\n");
+if (command === "true" && existsSync(here + "/block-probe")) {
+  writeFileSync(here + "/probe-started", "");
+  while (!existsSync(here + "/release")) await new Promise((done) => setTimeout(done, 20));
+}
 const { up } = JSON.parse(readFileSync(here + "/ssh.json", "utf8"));
 if (!up) { process.stderr.write("ssh: connect to host: Connection refused"); process.exit(255); }
 if (command === "true") process.exit(0);
@@ -730,6 +734,28 @@ describe("confirmation in the shell", () => {
 });
 
 describe("pull handlers", () => {
+  it("records a renewed lease using the time that made it eligible", async () => {
+    const samples: number[] = [];
+    const hub = await fixture({}, { now: () => samples.shift() ?? clock });
+    const rev = await board(hub, [DECIDE], { kind: "pull", name: "poller" });
+    const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+    const first = await hub.actions.next("example", "poller");
+    const expiry = Date.parse(first!.leaseUntil!);
+    // The clock moves back after lease eligibility has been checked.
+    samples.push(expiry, expiry, expiry - 1);
+    const renewed = await hub.actions.next("example", "poller");
+    expect(renewed).toMatchObject({
+      requestId,
+      leaseUntil: new Date(expiry + 5 * 60_000).toISOString(),
+    });
+    expect(await hub.actions.list("example")).toMatchObject({
+      damaged: false,
+      requests: [
+        { requestId, updatedAt: new Date(expiry).toISOString(), leaseUntil: renewed!.leaseUntil },
+      ],
+    });
+  });
+
   it("leases a request to one consumer, offers it again after the lease, and claims once", async () => {
     const hub = await fixture();
     const rev = await board(hub, [DECIDE], { kind: "pull", name: "poller" });
@@ -896,8 +922,10 @@ describe("removal and damaged logs", () => {
 
   it.each([
     { transport: "sending", attempts: 2 },
+    { transport: "failed", attempts: 2, nextAttemptAt: "2026-11-21T20:00:00.000Z", error: "SSH" },
     { transport: "failed", attempts: 5, nextAttemptAt: "2026-11-21T20:00:00.000Z", error: "SSH" },
     { transport: "stalled", attempts: 1, nextAttemptAt: null, error: "SSH" },
+    { transport: "stalled", attempts: 5, nextAttemptAt: null, error: "SSH" },
   ])("rejects impossible attempt counts for $transport", async (fields) => {
     const hub = await fixture();
     const rev = await board(hub);
@@ -942,7 +970,7 @@ describe("removal and damaged logs", () => {
     },
   );
 
-  it("keeps a late reachability result counted before Retry", async () => {
+  it("counts a reachability check that finishes after Retry against the fresh budget", async () => {
     const hub = await fixture((threadCommand) => ({
       threadEnvironments: { remote: { host: "worker-host", threadCommand } },
     }));
@@ -953,22 +981,61 @@ describe("removal and damaged logs", () => {
     const due = (await states(hub))[0]!;
     expect(due).toMatchObject({ state: "failed", attempts: 1 });
     clock = Date.parse(due.nextAttemptAt!);
-    expect((await page(hub, "/api/request", { requestId, choice: "retry" })).status).toBe(200);
-    const recorded = {
-      event: "transport",
-      requestId,
-      transport: "failed",
-      attempts: due.attempts + 1,
-      at: new Date(clock).toISOString(),
-      nextAttemptAt: new Date(clock + 300_000).toISOString(),
-      error: "Cannot reach worker-host over SSH",
-    };
-    const log = join(hub.config.dataRoot, "example", "actions.jsonl");
-    await appendFile(log, JSON.stringify(recorded) + "\n");
+    await writeFile(join(hub.root, "block-probe"), "");
+    const pass = hub.delivery.runOnce();
+    try {
+      const started = join(hub.root, "probe-started");
+      await expect.poll(() => readFile(started, "utf8").catch(() => null)).toBe("");
+      expect((await page(hub, "/api/request", { requestId, choice: "retry" })).status).toBe(200);
+      expect((await states(hub))[0]).toMatchObject({ state: "queued", attempts: 0 });
+    } finally {
+      await hub.fake.release();
+      await pass;
+    }
     const shown = await write(hub, "example/action/show", { requestId });
     expect(shown.value()).toMatchObject({
       damaged: false,
-      requests: [{ state: "failed", attempts: 2, mayBeDelivered: false }],
+      requests: [
+        {
+          state: "failed",
+          attempts: 1,
+          nextAttemptAt: new Date(clock + 60_000).toISOString(),
+          mayBeDelivered: false,
+        },
+      ],
+    });
+  });
+
+  it("refuses forced removal if its records would fail replay", async () => {
+    const hub = await fixture();
+    const rev = await board(hub);
+    const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+    const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+    const before = await readFile(log, "utf8");
+    await expect(hub.store.remove("example", true, " ")).rejects.toThrow("Actor");
+    expect(await readFile(log, "utf8")).toBe(before);
+    expect(await hub.actions.list("example")).toMatchObject({
+      damaged: false,
+      requests: [{ requestId, transport: "queued", handling: "unclaimed" }],
+    });
+  });
+
+  it("preserves the original log if repaired state would fail replay", async () => {
+    const hub = await fixture();
+    const rev = await board(hub);
+    await page(hub, "/api/act", click(rev));
+    const directory = join(hub.config.dataRoot, "example");
+    const log = join(directory, "actions.jsonl");
+    await appendFile(log, "bad record\nincomplete");
+    const before = await readFile(log, "utf8");
+    const files = (await readdir(directory)).toSorted();
+    await expect(hub.actions.repair("example", " ")).rejects.toThrow("Actor");
+    expect(await readFile(log, "utf8")).toBe(before);
+    expect((await readdir(directory)).toSorted()).toEqual(files);
+    expect(await hub.actions.repair("example", HANDLER_ID)).toEqual({ kept: 1, setAside: 2 });
+    expect(await hub.actions.list("example")).toMatchObject({
+      damaged: false,
+      requests: [{ transport: "ambiguous" }],
     });
   });
 

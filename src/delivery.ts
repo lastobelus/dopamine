@@ -187,16 +187,18 @@ export class Delivery {
     await Promise.all(started);
   }
 
-  private async fail(id: string, request: ActionRequest, error: string): Promise<void> {
-    const attempts = request.attempts + 1;
-    const stalled = attempts >= MAX_DELIVERY_ATTEMPTS;
-    await this.actions.recordTransport(id, request.requestId, ["queued", "failed"], {
-      transport: stalled ? "stalled" : "failed",
-      attempts,
-      error: error.slice(0, 600),
-      nextAttemptAt: stalled
-        ? null
-        : new Date(this.now() + RETRY_DELAYS_MS[attempts - 1]!).toISOString(),
+  private async fail(id: string, requestId: string, error: string): Promise<void> {
+    await this.actions.recordTransport(id, requestId, ["queued", "failed"], (request, at) => {
+      const attempts = request.attempts + 1;
+      const stalled = attempts === MAX_DELIVERY_ATTEMPTS;
+      return {
+        transport: stalled ? "stalled" : "failed",
+        attempts,
+        error: error.slice(0, 600),
+        nextAttemptAt: stalled
+          ? null
+          : new Date(Date.parse(at) + RETRY_DELAYS_MS[attempts - 1]!).toISOString(),
+      };
     });
   }
 
@@ -231,9 +233,13 @@ export class Delivery {
     const handler = queued.handler as ThreadReference;
     const environment = threadEnvironment(this.config, handler.environmentId);
     if (!environment)
-      return this.fail(id, queued, "The handler's environment is not configured on this hub");
+      return this.fail(
+        id,
+        queued.requestId,
+        "The handler's environment is not configured on this hub",
+      );
     const unreachable = await this.reachable(environment);
-    if (unreachable) return this.fail(id, queued, unreachable);
+    if (unreachable) return this.fail(id, queued.requestId, unreachable);
     const request = await this.actions.beginSend(id, queued.requestId);
     if (!request) return;
     const command = [...environment.threadCommand, "send", handler.threadId, "-", "--json"];
@@ -267,10 +273,7 @@ export class Delivery {
       /* No receipt. */
     }
     // Anything but a receipt is ambiguous: the message may have arrived, so never resend it here.
-    await this.actions.recordTransport(
-      id,
-      request.requestId,
-      ["sending"],
+    await this.actions.recordTransport(id, request.requestId, ["sending"], () =>
       receipt
         ? { transport: "delivered", receipt, error: null }
         : {
