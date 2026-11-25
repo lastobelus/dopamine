@@ -418,3 +418,39 @@ describe("shell confirmation", () => {
     expect(new URLSearchParams(view.location.search).get("dopamine-path")).toBe("/details");
   });
 });
+
+describe("page actions", () => {
+  it("resends the same click after a hub failure, so a recorded click is not sent twice", async () => {
+    const view: { dopamine?: { act: (...args: unknown[]) => Promise<{ requestId: string }> } } = {};
+    const posts: string[] = [];
+    runInNewContext(await readFile(new URL("../web/dopamine.js", import.meta.url), "utf8"), {
+      window: view,
+      parent: view,
+      location: { href: "http://example--workstation.hub.localhost/", search: "", pathname: "/" },
+      URL,
+      URLSearchParams,
+      crypto,
+      history: { pushState() {}, replaceState() {} },
+      addEventListener() {},
+      document: { addEventListener() {} },
+      setTimeout: (callback: () => void) => callback(),
+      clearTimeout() {},
+      async fetch(path: string, options?: { body?: string }) {
+        if (path === "/dopamine-meta.json")
+          return { ok: true, json: async () => ({ shell: "http://hub.localhost/d/x--y" }) };
+        posts.push(options!.body!);
+        return posts.length === 1
+          ? { ok: false, status: 502, json: async () => ({ error: "Peer deadline exceeded" }) }
+          : {
+              ok: true,
+              status: 200,
+              json: async () => ({ request: { requestId: "r-1", state: "queued" } }),
+            };
+      },
+    });
+    const request = await view.dopamine!.act("decide", { collection: "c", key: "k", itemRev: 1 });
+    expect(request.requestId).toBe("r-1");
+    expect(posts).toHaveLength(2);
+    expect(JSON.parse(posts[0]!).clickId).toBe(JSON.parse(posts[1]!).clickId);
+  });
+});

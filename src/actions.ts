@@ -326,7 +326,10 @@ async function append(directory: string, events: LogEvent[]): Promise<void> {
 
 /** Before removal: refuse while work may be running, and with force abandon what was never sent. */
 export async function prepareRemoval(directory: string, force: boolean, by: string): Promise<void> {
-  const requests = [...(await readLog(directory)).requests.values()];
+  const log = await readLog(directory);
+  if (log.damaged)
+    throw new HttpError(409, "Action log damaged; run dash action repair before removing");
+  const requests = [...log.requests.values()];
   // A request can be done while its send is still running; removal waits for the send either way.
   if (requests.some((request) => request.transport === "sending" || request.handling === "claimed"))
     throw new HttpError(409, "An action request is being sent or handled; try again later");

@@ -204,6 +204,17 @@ function identity(config: HubConfig, parsed: Parsed, env: NodeJS.ProcessEnv): st
   );
 }
 
+/** A pull handler may have no thread identity; it writes as its own name. */
+function writerFor(config: HubConfig, parsed: Parsed, env: NodeJS.ProcessEnv): string {
+  const pull = parsed.command === "action" ? stringFlag(parsed, "handler") : undefined;
+  if (pull === undefined || parsed.flags.has("as")) return identity(config, parsed, env);
+  try {
+    return identity(config, parsed, env);
+  } catch {
+    return writer(`pull/${pull}`);
+  }
+}
+
 function threadRef(value: string): JsonObject {
   if (value.startsWith("{")) return object(json(value), "Thread reference");
   if (value.startsWith("pull:")) {
@@ -796,7 +807,7 @@ export async function runDash(argv: string[], options: ClientOptions = {}): Prom
     config,
     options,
     parsed,
-    ...(write ? { identity: identity(config, parsed, env) } : {}),
+    ...(write ? { identity: writerFor(config, parsed, env) } : {}),
   };
   if (parsed.command === "action") return await actionCommand(ctx);
   if (parsed.command === "list") {

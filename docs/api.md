@@ -166,7 +166,7 @@ Claim, ack and `show <name> <requestId>` also find requests in removed copies of
 
 ### Pull handlers
 
-`dash action next <name> --handler <pull-name> [--wait]` takes the oldest queued request for that pull handler and leases it for five minutes: it is marked `delivered` and offered to no one else until the lease ends unclaimed. `--wait` asks every two seconds until a request arrives. The dashboard's status shows "not polling" when the handler has not asked for 24 hours, by this hub's memory since it started.
+`dash action next <name> --handler <pull-name> [--wait]` takes the oldest queued request for that pull handler and leases it for five minutes: it is marked `delivered` and offered to no one else until the lease ends unclaimed. `--wait` asks every two seconds until a request arrives. Without a thread identity, pull commands write as `pull/<name>`. The dashboard's status shows "not polling" when the handler has not asked for 24 hours, by this hub's memory since it started.
 
 ### Removal and damaged logs
 

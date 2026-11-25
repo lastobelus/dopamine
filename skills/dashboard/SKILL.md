@@ -106,4 +106,4 @@ A delivered action arrives as a message that starts with `[dashboard action]`. I
 
 If you claimed a request and lost track of it (for example, after a restart), look for the work by its request ID. Ack `done` if you find it; otherwise ack `{"status":"unknown"}` and the reader decides whether to run it again. Never redo claimed work without that.
 
-A harness with no inbox uses a pull handler instead: create the dashboard with `--handler pull:<name>`, then loop on `dash action next <machine>/<id> --handler <name> --wait`, and pass `--handler <name>` to `claim` and `ack` too.
+A harness with no inbox uses a pull handler instead: create the dashboard with `--handler pull:<name>`, then loop on `dash action next <machine>/<id> --handler <name> --wait`, and pass `--handler <name>` to `claim` and `ack` too. These commands need no thread identity.

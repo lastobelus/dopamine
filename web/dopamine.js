@@ -180,7 +180,8 @@
         try {
           return await post("/api/act", click);
         } catch (error) {
-          if (error.status || attempt === 2) throw error;
+          // A hub or peer failure may have recorded the click; the same click ID finds it.
+          if ((error.status && error.status < 500) || attempt === 2) throw error;
           await new Promise((done) => setTimeout(done, 500 * (attempt + 1)));
           return send(attempt + 1);
         }

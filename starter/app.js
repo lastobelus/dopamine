@@ -4,7 +4,7 @@ const root = document.querySelector("#collections");
 let saved = {},
   current,
   manifest,
-  handlerState,
+  latestRequests = [],
   ready = false,
   debounce;
 const requestBoxes = new Map(),
@@ -126,6 +126,29 @@ function drawRequests(stable) {
   const notice = notices.get(stable);
   box.replaceChildren(...(notice ? [notice] : []), ...rows);
 }
+let otherRequests;
+/** Requests that need the reader but have no item card, such as one for a deleted item. */
+function drawOtherRequests() {
+  const rows = latestRequests
+    .filter(
+      (request) =>
+        CHOICES[request.state] &&
+        !requestBoxes.has(JSON.stringify([request.target.collection, request.target.key])),
+    )
+    .map((request) => {
+      const row = requestRow(request);
+      row.prepend(el("strong", `${request.target.key ?? request.target.collection} · `));
+      return row;
+    });
+  if (!otherRequests) {
+    if (!rows.length) return;
+    otherRequests = el("section");
+    otherRequests.append(el("h2", "Other requests"), el("div"));
+    root.after(otherRequests);
+  }
+  otherRequests.hidden = rows.length === 0;
+  otherRequests.children[1].replaceChildren(...rows);
+}
 async function act(action, collection, key, payload, confirmDuplicate = false) {
   const stable = JSON.stringify([collection, key]);
   notices.delete(stable);
@@ -158,7 +181,6 @@ function actionControls(name, key, record) {
     for (const answer of answers.length ? answers : [null]) {
       const button = el("button", answer ?? action.label);
       button.type = "button";
-      button.disabled = ["archived", "missing"].includes(handlerState);
       button.addEventListener(
         "click",
         () => void act(action, name, key, answer === null ? null : { answer }),
@@ -275,6 +297,7 @@ function render(data) {
       cards.delete(key);
       requestBoxes.delete(key);
     }
+  drawOtherRequests();
   for (const [name, section] of sections)
     if (!data.collections[name]) {
       section.remove();
@@ -304,23 +327,20 @@ function render(data) {
     document.querySelector("#title").textContent = meta.manifest.title;
     document.title = meta.manifest.title;
     manifest = meta.manifest;
-    handlerState = meta.handlerState;
-    if (["archived", "missing"].includes(handlerState))
-      showError(
-        new Error("This dashboard's handler thread is unavailable, so its buttons are off."),
-      );
   } catch (error) {
     showError(error);
   }
   dopamine.subscribe(render, showError);
   if (manifest?.actions?.length)
     dopamine.watchRequests((requests) => {
+      latestRequests = requests;
       requestsByItem.clear();
       for (const request of requests) {
         const stable = JSON.stringify([request.target.collection, request.target.key]);
         requestsByItem.set(stable, [...(requestsByItem.get(stable) ?? []), request]);
       }
       for (const stable of requestBoxes.keys()) drawRequests(stable);
+      drawOtherRequests();
     }, showError);
   ready = true;
 })();

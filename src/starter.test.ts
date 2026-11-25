@@ -36,6 +36,15 @@ class Element {
     this.listeners[name] = callback;
   }
   setAttribute() {}
+  prepend(...nodes: (Element | string)[]) {
+    const existing = this.children;
+    this.children = [];
+    this.append(...(nodes as Element[]));
+    this.children.push(...existing);
+  }
+  after(node: Element) {
+    this.parent?.append(node);
+  }
   all(): Element[] {
     return [this, ...this.children.flatMap((child) => child.all())];
   }
@@ -50,6 +59,7 @@ async function page(
   const nodes = Object.fromEntries(
     ["collections", "title", "updated", "error", "empty"].map((id) => [id, new Element("div")]),
   );
+  new Element("main").append(nodes.collections!);
   let render: ((data: unknown) => void) | undefined;
   runInNewContext(await readFile(new URL("../starter/app.js", import.meta.url), "utf8"), {
     document: {
@@ -251,6 +261,11 @@ describe("starter rendering", () => {
     ]);
     expect(root.all().filter((node) => node.className.startsWith("request "))).toHaveLength(4);
     expect(root.text()).toContain("May have been delivered");
+    // Once the item is deleted, its request that needs the reader is still reachable.
+    render({ rev: 5, collections: { needs: { rev: 5, order: [], items: {} } } });
+    const other = root.parent!.children.find((node) => node.text().includes("Other requests"))!;
+    expect(other.hidden).toBe(false);
+    expect(other.text()).toContain("May have been delivered");
     expect(root.all().some((node) => node.tag === "a" && node.textContent === "Shipped")).toBe(
       false,
     );

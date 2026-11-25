@@ -686,7 +686,14 @@ export async function startHub(
     target.search = (req.url ?? "").includes("?")
       ? (req.url ?? "").slice((req.url ?? "").indexOf("?"))
       : "";
-    const response = await call(target, req.method, headers, bytes);
+    // Accepting a click may read the handler thread over SSH for up to ten seconds.
+    const response = await call(
+      target,
+      req.method,
+      headers,
+      bytes,
+      path === "/api/act" ? 30_000 : undefined,
+    );
     const returned: Record<string, string> = {};
     for (const header of [
       "content-type",

@@ -810,6 +810,7 @@ describe("removal and damaged logs", () => {
     await writeFile(log, [lines[0], "not json", ...lines.slice(1)].join("\n"));
     const refused = await page(hub, "/api/act", click(rev));
     expect(refused.status).toBe(503);
+    expect((await write(hub, "example/remove", { force: true })).status).toBe(409);
     expect(refused.value().error).toContain("dash action repair");
     expect((await write(hub, "example/action/repair", {})).value()).toEqual({
       kept: 2,
@@ -849,6 +850,12 @@ describe("dash action", () => {
       '{"title":"Ship it?","options":[{"label":"Yes"}]}',
     );
     expect(await dash("action", "next", "example", "--handler", "poller")).toBe("No request");
+    // A pull handler outside a thread harness needs no thread identity.
+    expect(
+      await runDash(["--config", configPath, "action", "next", "example", "--handler", "poller"], {
+        env: {},
+      }),
+    ).toBe("No request");
     const waiting = dash("action", "next", "example", "--handler", "poller", "--wait");
     const rev = (await hub.store.get("example")).data.collections.needs!.items.q1!.rev;
     const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
