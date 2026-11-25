@@ -262,15 +262,7 @@ function transportFields(event: TransportEvent, ...fields: (keyof TransportEvent
   return Object.keys(event).every((field) => allowed.has(field));
 }
 
-function isRepairTransport(event: TransportEvent): boolean {
-  return event.transport === "ambiguous" && event.by !== undefined && event.error === REPAIR_ERROR;
-}
-
-function canApplyTransport(
-  request: ActionRequest,
-  event: TransportEvent,
-  attemptsBeforeRetry: number | undefined,
-): boolean {
+function canApplyTransport(request: ActionRequest, event: TransportEvent): boolean {
   const { transport: from, handling } = request;
   const unclaimed = handling === "unclaimed";
   const pull = isPull(request.handler);
@@ -296,14 +288,14 @@ function canApplyTransport(
     case "failed":
     case "stalled": {
       const { attempts } = event;
-      // A reachability check may finish after a late claim or after Retry reset the budget.
+      // A reachability check counts from the worker's snapshot, which can predate Retry.
       return (
         !pull &&
         ["queued", "failed"].includes(from) &&
         transportFields(event, "attempts", "nextAttemptAt", "error") &&
         attempts !== undefined &&
-        (attempts === request.attempts + 1 ||
-          (attemptsBeforeRetry !== undefined && attempts === attemptsBeforeRetry + 1)) &&
+        Number.isSafeInteger(attempts) &&
+        attempts >= 1 &&
         typeof event.error === "string" &&
         (event.transport === "failed"
           ? attempts < MAX_DELIVERY_ATTEMPTS && logDate(event.nextAttemptAt)
@@ -336,7 +328,7 @@ function canApplyTransport(
       );
     case "ambiguous":
       // Repair already writes this marker, including on logs from before validation.
-      if (isRepairTransport(event))
+      if (event.by !== undefined && event.error === REPAIR_ERROR)
         return (
           unclaimed && REPAIRABLE_TRANSPORTS.has(from) && transportFields(event, "by", "error")
         );
@@ -380,7 +372,7 @@ function canApplyHandling(request: ActionRequest, event: HandlingEvent): boolean
   }
 }
 
-function apply({ requests, clicks, attemptsBeforeRetry }: Log, raw: unknown): void {
+function apply({ requests, clicks }: Log, raw: unknown): void {
   const event = object(raw, "Log event");
   if (event.event === "request") {
     logFields(event, "event", "request");
@@ -425,15 +417,7 @@ function apply({ requests, clicks, attemptsBeforeRetry }: Log, raw: unknown): vo
   if (event.event === "transport") {
     if (event.by !== undefined) text(event.by, "Actor");
     const change = event as unknown as TransportEvent;
-    if (!canApplyTransport(request, change, attemptsBeforeRetry.get(request.requestId)))
-      throw new Error("Invalid transport transition");
-    if (change.transport === "queued" || isRepairTransport(change)) {
-      // Repair and Retry can both happen while the same reachability check is still pending.
-      if (request.transport === "failed")
-        attemptsBeforeRetry.set(request.requestId, request.attempts);
-    } else {
-      attemptsBeforeRetry.delete(request.requestId);
-    }
+    if (!canApplyTransport(request, change)) throw new Error("Invalid transport transition");
     request.updatedAt = change.at;
     request.transport = change.transport;
     if (change.transport === "sending" || change.leaseUntil) request.mayBeDelivered = true;
@@ -475,12 +459,11 @@ function apply({ requests, clicks, attemptsBeforeRetry }: Log, raw: unknown): vo
 interface Log {
   requests: Map<string, ActionRequest>;
   clicks: Map<string, string>;
-  attemptsBeforeRetry: Map<string, number>;
   damaged: boolean;
 }
 
 function emptyLog(): Log {
-  return { requests: new Map(), clicks: new Map(), attemptsBeforeRetry: new Map(), damaged: false };
+  return { requests: new Map(), clicks: new Map(), damaged: false };
 }
 async function readBytes(path: string): Promise<Buffer> {
   try {

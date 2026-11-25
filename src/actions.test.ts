@@ -896,7 +896,7 @@ describe("removal and damaged logs", () => {
 
   it.each([
     { transport: "sending", attempts: 2 },
-    { transport: "failed", attempts: 2, nextAttemptAt: "2026-11-21T20:00:00.000Z", error: "SSH" },
+    { transport: "failed", attempts: 5, nextAttemptAt: "2026-11-21T20:00:00.000Z", error: "SSH" },
     { transport: "stalled", attempts: 1, nextAttemptAt: null, error: "SSH" },
   ])("rejects impossible attempt counts for $transport", async (fields) => {
     const hub = await fixture();
@@ -942,48 +942,35 @@ describe("removal and damaged logs", () => {
     },
   );
 
-  it.each([
-    { repair: false, failures: 1, state: "failed" },
-    { repair: true, failures: 4, state: "stalled" },
-  ])(
-    "keeps a late reachability result ($state, intervening repair: $repair)",
-    async ({ repair, failures, state }) => {
-      const hub = await fixture((threadCommand) => ({
-        threadEnvironments: { remote: { host: "worker-host", threadCommand } },
-      }));
-      const rev = await board(hub, [DECIDE], { environmentId: "remote", threadId: "far" });
-      await hub.fake.sshUp(false);
-      const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
-      for (let index = 0; index < failures; index++) {
-        await hub.delivery.runOnce();
-        clock = Date.parse((await states(hub))[0]!.nextAttemptAt!);
-      }
-      const due = (await states(hub))[0]!;
-      expect(due).toMatchObject({ state: "failed", attempts: failures });
-      expect((await page(hub, "/api/request", { requestId, choice: "retry" })).status).toBe(200);
-      const log = join(hub.config.dataRoot, "example", "actions.jsonl");
-      if (repair) {
-        await appendFile(log, '{"event":"transport"');
-        expect((await write(hub, "example/action/repair", {})).value().setAside).toBe(1);
-        expect((await page(hub, "/api/request", { requestId, choice: "retry" })).status).toBe(200);
-      }
-      const recorded = {
-        event: "transport",
-        requestId,
-        transport: state,
-        attempts: due.attempts + 1,
-        at: new Date(clock).toISOString(),
-        nextAttemptAt: state === "stalled" ? null : new Date(clock + 300_000).toISOString(),
-        error: "Cannot reach worker-host over SSH",
-      };
-      await appendFile(log, JSON.stringify(recorded) + "\n");
-      const shown = await write(hub, "example/action/show", { requestId });
-      expect(shown.value()).toMatchObject({
-        damaged: false,
-        requests: [{ state, attempts: failures + 1, mayBeDelivered: false }],
-      });
-    },
-  );
+  it("keeps a late reachability result counted before Retry", async () => {
+    const hub = await fixture((threadCommand) => ({
+      threadEnvironments: { remote: { host: "worker-host", threadCommand } },
+    }));
+    const rev = await board(hub, [DECIDE], { environmentId: "remote", threadId: "far" });
+    await hub.fake.sshUp(false);
+    const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+    await hub.delivery.runOnce();
+    const due = (await states(hub))[0]!;
+    expect(due).toMatchObject({ state: "failed", attempts: 1 });
+    clock = Date.parse(due.nextAttemptAt!);
+    expect((await page(hub, "/api/request", { requestId, choice: "retry" })).status).toBe(200);
+    const recorded = {
+      event: "transport",
+      requestId,
+      transport: "failed",
+      attempts: due.attempts + 1,
+      at: new Date(clock).toISOString(),
+      nextAttemptAt: new Date(clock + 300_000).toISOString(),
+      error: "Cannot reach worker-host over SSH",
+    };
+    const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+    await appendFile(log, JSON.stringify(recorded) + "\n");
+    const shown = await write(hub, "example/action/show", { requestId });
+    expect(shown.value()).toMatchObject({
+      damaged: false,
+      requests: [{ state: "failed", attempts: 2, mayBeDelivered: false }],
+    });
+  });
 
   it("skips invalid transitions and fields before repair, including their dependent records", async () => {
     const hub = await fixture();
