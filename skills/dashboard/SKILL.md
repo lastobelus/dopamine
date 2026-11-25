@@ -34,6 +34,8 @@ If `dash --help` does not list these commands, a system shell also named `dash` 
 | `dash action next`, `dash action show`               | Ask for a pull handler's next action; show a dashboard's requests.              |
 | `dash action repair`                                 | Repair a damaged action log (the hub says when).                                |
 
+`dash action repair <name>` keeps the records that still apply and sets the rest aside beside the dashboard's action log. An incomplete final record goes byte for byte into `actions.tail-*`, and unreadable or no-longer-applicable records go into `actions.damaged-*.jsonl`. It prints the kept and set-aside counts. An incomplete tail counts as one. If it sets anything aside, unclaimed requests in `queued`, `sending`, `failed` or `delivered` become `ambiguous` and wait for the reader to Retry or Abandon. A clean log is left untouched.
+
 A `<name>` is either a local `<id>` or `<machine>/<id>`, where `<machine>` is a machine name from config.
 
 The CLI takes the caller's identity from validated harness environment variables. Without them, pass `--as <environment>/<thread>`. That identity is asserted by the caller, not verified.

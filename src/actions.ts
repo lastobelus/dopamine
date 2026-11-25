@@ -286,16 +286,17 @@ async function writeSide(path: string, body: Buffer | string): Promise<void> {
   }
 }
 
+async function writeTail(directory: string, tail: Buffer): Promise<void> {
+  await writeSide(join(directory, `actions.tail-${Date.now()}-${randomUUID()}`), tail);
+}
+
 /** Sets aside an incomplete final record, then refuses to continue a damaged log. */
 async function prepareAppend(directory: string): Promise<Log> {
   const path = join(directory, LOG);
   const bytes = await readBytes(path);
   const end = bytes.lastIndexOf(10) + 1;
   if (end < bytes.length) {
-    await writeSide(
-      join(directory, `actions.tail-${Date.now()}-${randomUUID()}`),
-      bytes.subarray(end),
-    );
+    await writeTail(directory, bytes.subarray(end));
     const handle = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW);
     try {
       await handle.truncate(end);
@@ -792,10 +793,12 @@ export class ActionStore {
       const { directory } = await this.locate(id);
       const path = join(directory, LOG);
       const bytes = await readBytes(path);
+      const end = bytes.lastIndexOf(10) + 1;
+      const tail = bytes.subarray(end);
       let requests = new Map<string, ActionRequest>();
       const kept: string[] = [];
       const damaged: string[] = [];
-      for (const line of bytes.toString("utf8").split("\n")) {
+      for (const line of bytes.subarray(0, end).toString("utf8").split("\n")) {
         if (!line) continue;
         try {
           const trial = structuredClone(requests);
@@ -806,11 +809,16 @@ export class ActionStore {
           damaged.push(line);
         }
       }
-      if (!damaged.length) return { kept: kept.length, setAside: 0 };
-      await writeSide(
-        join(directory, `actions.damaged-${Date.now()}-${randomUUID()}.jsonl`),
-        `${damaged.join("\n")}\n`,
-      );
+      const setAside = damaged.length + Number(tail.length > 0);
+      if (!setAside) return { kept: kept.length, setAside };
+      if (tail.length) await writeTail(directory, tail);
+      if (damaged.length)
+        await writeSide(
+          join(directory, `actions.damaged-${Date.now()}-${randomUUID()}.jsonl`),
+          `${damaged.join("\n")}\n`,
+        );
+      // Make the saved records durable before replacing the original log.
+      await syncDirectory(directory);
       const at = this.at();
       const recovered = [...requests.values()]
         .filter(
@@ -836,7 +844,7 @@ export class ActionStore {
       } finally {
         await rm(temporary, { force: true });
       }
-      return { kept: kept.length, setAside: damaged.length };
+      return { kept: kept.length, setAside };
     });
   }
 

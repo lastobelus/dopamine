@@ -770,6 +770,67 @@ describe("pull handlers", () => {
 });
 
 describe("removal and damaged logs", () => {
+  it.each(["truncated", "unterminated"])(
+    "sets aside a %s final record during repair",
+    async (kind) => {
+      const hub = await fixture();
+      const rev = await board(hub);
+      const directory = join(hub.config.dataRoot, "example");
+      const log = join(directory, "actions.jsonl");
+      const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+      const complete = await readFile(log);
+      expect((await page(hub, "/api/act", click(rev))).status).toBe(202);
+      const both = await readFile(log);
+      const tail =
+        kind === "truncated"
+          ? Buffer.concat([Buffer.from('{"event":"transport","error":"'), Buffer.from([0xe2])])
+          : both.subarray(complete.length, -1);
+      await writeFile(log, Buffer.concat([complete, tail]));
+      const configPath = join(hub.root, "config.json");
+      await writeFile(configPath, JSON.stringify(hub.config));
+      expect(
+        await runDash(
+          ["--config", configPath, "--as", "environment/owner", "action", "repair", "example"],
+          {
+            env: {},
+          },
+        ),
+      ).toBe("kept 1, set aside 1");
+      const sideFiles = (await readdir(directory)).filter((name) =>
+        name.startsWith("actions.tail-"),
+      );
+      expect(sideFiles).toHaveLength(1);
+      expect(await readFile(join(directory, sideFiles[0]!))).toEqual(tail);
+      expect((await readFile(log)).subarray(0, complete.length)).toEqual(complete);
+      expect(await states(hub)).toEqual([
+        expect.objectContaining({ requestId, state: "ambiguous" }),
+      ]);
+      await hub.delivery.runOnce();
+      expect(await hub.fake.calls()).toHaveLength(0);
+      expect((await write(hub, "example/action/repair", {})).value()).toEqual({
+        kept: 2,
+        setAside: 0,
+      });
+    },
+  );
+
+  it("leaves a clean log and its queued request intact during repair", async () => {
+    const hub = await fixture();
+    const rev = await board(hub);
+    const directory = join(hub.config.dataRoot, "example");
+    const log = join(directory, "actions.jsonl");
+    const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+    const complete = await readFile(log);
+    const files = (await readdir(directory)).toSorted();
+    expect((await write(hub, "example/action/repair", {})).value()).toEqual({
+      kept: 1,
+      setAside: 0,
+    });
+    expect(await readFile(log)).toEqual(complete);
+    expect((await readdir(directory)).toSorted()).toEqual(files);
+    expect(await states(hub)).toEqual([expect.objectContaining({ requestId, state: "queued" })]);
+  });
+
   it("refuses removal with open requests, and a forced removal makes a late claim fail", async () => {
     const hub = await fixture();
     const rev = await board(hub);
@@ -816,10 +877,15 @@ describe("removal and damaged logs", () => {
     expect(refused.status).toBe(503);
     expect((await write(hub, "example/remove", { force: true })).status).toBe(409);
     expect(refused.value().error).toContain("dash action repair");
+    await appendFile(log, '{"event":');
     expect((await write(hub, "example/action/repair", {})).value()).toEqual({
       kept: 2,
-      setAside: 1,
+      setAside: 2,
     });
+    const directory = join(hub.config.dataRoot, "example");
+    const files = await readdir(directory);
+    const damaged = files.find((name) => name.startsWith("actions.damaged-"));
+    expect(await readFile(join(directory, damaged!), "utf8")).toBe("not json\n");
     // Nothing is resent automatically after a repair.
     expect((await states(hub)).map((entry) => entry.state)).toEqual(["ambiguous", "ambiguous"]);
     await hub.delivery.runOnce();
