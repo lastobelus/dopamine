@@ -81,6 +81,13 @@ async function page(
   if (!render) throw new Error("Starter did not subscribe");
   return { render, root: nodes.collections! };
 }
+const request = (requestId: string, state: string) => ({
+  requestId,
+  label: "Decide",
+  payload: null,
+  state,
+  target: { collection: "needs", key: "q1" },
+});
 const item = (rev: number, value: unknown) => ({
   rev,
   by: "environment/thread",
@@ -234,6 +241,16 @@ describe("starter rendering", () => {
       },
     ]);
     expect(root.text()).toContain("Shipped");
+    // An older request that needs the reader stays visible behind newer finished ones.
+    showRequests!([
+      request("r-0", "ambiguous"),
+      request("r-1", "done"),
+      request("r-2", "done"),
+      request("r-3", "done"),
+      request("r-4", "done"),
+    ]);
+    expect(root.all().filter((node) => node.className.startsWith("request "))).toHaveLength(4);
+    expect(root.text()).toContain("May have been delivered");
     expect(root.all().some((node) => node.tag === "a" && node.textContent === "Shipped")).toBe(
       false,
     );

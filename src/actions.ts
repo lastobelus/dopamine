@@ -326,12 +326,14 @@ async function append(directory: string, events: LogEvent[]): Promise<void> {
 
 /** Before removal: refuse while work may be running, and with force abandon what was never sent. */
 export async function prepareRemoval(directory: string, force: boolean, by: string): Promise<void> {
-  const pending = [...(await readLog(directory)).requests.values()].filter(isOpen);
+  const requests = [...(await readLog(directory)).requests.values()];
+  // A request can be done while its send is still running; removal waits for the send either way.
+  if (requests.some((request) => request.transport === "sending" || request.handling === "claimed"))
+    throw new HttpError(409, "An action request is being sent or handled; try again later");
+  const pending = requests.filter(isOpen);
   if (!pending.length) return;
   if (!force)
     throw new HttpError(409, "This dashboard has open action requests; remove it with --force");
-  if (pending.some((request) => request.transport === "sending" || request.handling === "claimed"))
-    throw new HttpError(409, "An action request is being sent or handled; try again later");
   const at = new Date().toISOString();
   await prepareAppend(directory);
   const events: LogEvent[] = [];
@@ -445,11 +447,8 @@ export class ActionStore {
     if (click.confirmDuplicate !== undefined && typeof click.confirmDuplicate !== "boolean")
       throw new HttpError(400, "confirmDuplicate must be a boolean");
     const payload = json(click.payload ?? null);
-    const fingerprint = canonical({
-      ...click,
-      payload,
-      confirmDuplicate: click.confirmDuplicate === true,
-    });
+    // Every field as sent, so a resent click matches only if nothing in it changed.
+    const fingerprint = canonical(click);
     const { manifest } = await this.store.get(id);
     const checked = manifest.handler;
     const handlerUp = checked ? await available(checked) : false;
@@ -553,17 +552,19 @@ export class ActionStore {
     return { collection, collectionRev };
   }
 
+  /** The live dashboard's requests, or for a request ID, the copy that holds that request. */
   async list(
     id: string,
-    filter: { collection?: string; key?: string } = {},
+    filter: { collection?: string; key?: string; requestId?: string } = {},
   ): Promise<{ requests: ActionRequest[]; damaged: boolean }> {
     return await this.store.exclusive(id, async () => {
-      const { directory } = await this.locate(id);
+      const { directory } = await this.locate(id, filter.requestId);
       const log = await readLog(directory);
       return {
         damaged: log.damaged,
         requests: [...log.requests.values()].filter(
           (request) =>
+            (filter.requestId === undefined || request.requestId === filter.requestId) &&
             (filter.collection === undefined || request.target.collection === filter.collection) &&
             (filter.key === undefined || request.target.key === filter.key),
         ),

@@ -116,7 +116,13 @@ function requestRow(request) {
 function drawRequests(stable) {
   const box = requestBoxes.get(stable);
   if (!box) return;
-  const rows = (requestsByItem.get(stable) ?? []).slice(-3).toReversed().map(requestRow);
+  // Keep every request that needs the reader; show only the latest few of the rest.
+  const requests = requestsByItem.get(stable) ?? [];
+  const latest = new Set(requests.slice(-3));
+  const rows = requests
+    .filter((request) => CHOICES[request.state] || latest.has(request))
+    .toReversed()
+    .map(requestRow);
   const notice = notices.get(stable);
   box.replaceChildren(...(notice ? [notice] : []), ...rows);
 }
@@ -152,7 +158,7 @@ function actionControls(name, key, record) {
     for (const answer of answers.length ? answers : [null]) {
       const button = el("button", answer ?? action.label);
       button.type = "button";
-      button.disabled = handlerState === "archived";
+      button.disabled = ["archived", "missing"].includes(handlerState);
       button.addEventListener(
         "click",
         () => void act(action, name, key, answer === null ? null : { answer }),
@@ -299,8 +305,10 @@ function render(data) {
     document.title = meta.manifest.title;
     manifest = meta.manifest;
     handlerState = meta.handlerState;
-    if (handlerState === "archived")
-      showError(new Error("This dashboard's handler thread is archived, so its buttons are off."));
+    if (["archived", "missing"].includes(handlerState))
+      showError(
+        new Error("This dashboard's handler thread is unavailable, so its buttons are off."),
+      );
   } catch (error) {
     showError(error);
   }

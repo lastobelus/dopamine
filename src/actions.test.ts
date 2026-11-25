@@ -42,6 +42,11 @@ async function fakes(directory: string) {
 const here = ${JSON.stringify(directory)};
 const args = process.argv.slice(2);
 if (args[0] === "read") {
+  if (existsSync(here + "/broken-" + args[1])) process.exit(1);
+  if (existsSync(here + "/missing-" + args[1])) {
+    process.stdout.write(JSON.stringify({ kind: "not-found", identifier: args[1] }));
+    process.exit(0);
+  }
   const archived = existsSync(here + "/archived-" + args[1]);
   process.stdout.write(JSON.stringify({ thread: { archived } }));
   process.exit(0);
@@ -85,7 +90,8 @@ process.exit(result.status ?? 1);
     ssh,
     mode: (mode: string) => writeFile(join(directory, "mode.json"), JSON.stringify({ mode })),
     sshUp: (up: boolean) => writeFile(join(directory, "ssh.json"), JSON.stringify({ up })),
-    archive: (threadId: string) => writeFile(join(directory, `archived-${threadId}`), ""),
+    archive: (threadId: string, state = "archived") =>
+      writeFile(join(directory, `${state}-${threadId}`), ""),
     release: () => writeFile(join(directory, "release"), ""),
     async calls(): Promise<{ args: string[]; input: string }[]> {
       try {
@@ -400,6 +406,44 @@ describe("accepting a click", () => {
     });
     expect((await page(hub, "/api/act", click(rev))).status).toBe(202);
   });
+
+  it.each(["missing", "broken"])(
+    "refuses a click when the handler thread reads as %s",
+    async (state) => {
+      const hub = await fixture();
+      const rev = await board(hub);
+      await hub.fake.archive("handler", state);
+      expect((await page(hub, "/api/act", click(rev))).status).toBe(409);
+      expect(await states(hub)).toHaveLength(0);
+    },
+  );
+
+  it("treats an omitted payload and a null one as different clicks", async () => {
+    const hub = await fixture();
+    const rev = await board(hub, [{ ...DECIDE, collections: ["needs"] }]);
+    const { payload: _payload, ...first } = click(rev);
+    expect((await page(hub, "/api/act", first)).status).toBe(202);
+    expect((await page(hub, "/api/act", { ...first, payload: null })).status).toBe(409);
+  });
+
+  it("hides a question from Needs you only for an answer to its current revision", async () => {
+    const hub = await fixture();
+    const rev = await board(hub);
+    const pending = async () =>
+      (await send(hub, "/api/index")).value().dashboards[0].pendingAnswers;
+    await page(hub, "/api/act", click(rev, { payload: null }));
+    expect(await pending()).toEqual([]);
+    await page(hub, "/api/act", click(rev));
+    expect(await pending()).toEqual([{ collection: "needs", key: "q1" }]);
+    await hub.store.post(
+      "example",
+      "needs",
+      "q1",
+      { value: { title: "Ship it now?", options: [{ label: "Yes" }] } },
+      "env/owner",
+    );
+    expect(await pending()).toEqual([]);
+  });
 });
 
 describe("delivering", () => {
@@ -494,6 +538,8 @@ describe("delivering", () => {
     expect((await write(hub, "example/action/ack", { requestId, status: "done" })).status).toBe(
       200,
     );
+    // Still waits once the request is done, because its send has not finished.
+    expect((await write(hub, "example/remove", {})).status).toBe(409);
     await hub.fake.release();
     await pass;
     const [request] = await states(hub);
@@ -741,6 +787,11 @@ describe("removal and damaged logs", () => {
     expect(claim.value().error).toBe("This request was already claimed or closed");
     const shown = await write(hub, "example/action/show", { requestId });
     expect(shown.value().requests[0].state).toBe("abandoned");
+    // A new dashboard with the same ID does not hide the old copy's request.
+    await board(hub);
+    expect((await write(hub, "example/action/show", { requestId })).value().requests).toEqual([
+      expect.objectContaining({ requestId, state: "abandoned" }),
+    ]);
   });
 
   it("sets aside an incomplete tail and refuses a damaged log until repair", async () => {

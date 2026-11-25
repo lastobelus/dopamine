@@ -289,17 +289,28 @@ async function threadState(
           ],
           { timeout: 10_000, maxBuffer: 1024 * 1024 },
         )
-      : await execute(command[0]!, command.slice(1), { timeout: 1000, maxBuffer: 1024 * 1024 });
+      : await execute(command[0]!, command.slice(1), {
+          timeout: remote ? 10_000 : 1000,
+          maxBuffer: 1024 * 1024,
+        });
     const result = JSON.parse(stdout) as {
+      kind?: unknown;
       thread?: { archived?: boolean };
       archived?: boolean;
       project?: unknown;
     };
+    // The thread CLI reports a thread it cannot find, including an archived one, as not-found.
+    if (result.kind === "not-found" || result.kind === "ambiguous")
+      return { state: "missing", project: null };
     return {
       state: (result.thread?.archived ?? result.archived) ? "archived" : "available",
       project: projectReference(result.project),
     };
-  } catch {
+  } catch (error) {
+    // SSH exits 255 when it cannot reach the host; delivery retries that with evidence.
+    const failure = error as { code?: unknown; killed?: boolean };
+    if (environment.host && (failure.code === 255 || failure.killed))
+      return { state: "unreachable", project: null };
     return unknown;
   }
 }
@@ -399,15 +410,21 @@ export async function startHub(
     const pendingAnswers: Summary["pendingAnswers"] = [];
     try {
       for (const request of (await actions.list(record.manifest.id)).requests) {
-        const { collection, key: item } = request.target;
+        const { collection, key: item, itemRev } = request.target;
+        const current =
+          item === undefined ? undefined : record.data.collections[collection]?.items[item];
+        // Only an answer to the question as it stands now; a changed question needs the reader again.
+        const answer = request.payload as { answer?: unknown } | null;
         if (
-          item !== undefined &&
+          current &&
+          current.rev === itemRev &&
           record.manifest.collections[collection]?.type === "questions" &&
+          typeof answer?.answer === "string" &&
           request.transport !== "awaiting-confirmation" &&
           request.transport !== "abandoned" &&
           request.handling !== "abandoned"
         )
-          pendingAnswers.push({ collection, key: item });
+          pendingAnswers.push({ collection, key: item! });
       }
     } catch {
       /* A dashboard removed meanwhile has no answers to show. */
@@ -533,8 +550,9 @@ export async function startHub(
   async function handlerAvailable(handler: Handler): Promise<boolean> {
     if (isPull(handler)) return true;
     if (!threadEnvironment(config, handler.environmentId)) return false;
+    // A click is accepted only for a thread known to exist, or one whose machine is unreachable now.
     const { state } = await threadState(config, handler, { ssh: options.ssh ?? "ssh" });
-    return state !== "archived";
+    return state === "available" || state === "unreachable";
   }
   async function actionCommand(
     id: string,
@@ -558,14 +576,11 @@ export async function startHub(
         return fullRequest(await actions.ack(id, String(requestId), claimant, result), now());
       }
       case "show": {
-        const { requests, damaged } = await actions.list(id);
-        const chosen =
-          payload.requestId === undefined
-            ? requests
-            : requests.filter((request) => request.requestId === payload.requestId);
-        if (payload.requestId !== undefined && !chosen.length)
-          throw new HttpError(404, "Action request not found");
-        return { requests: chosen.map((request) => fullRequest(request, now())), damaged };
+        const { requests, damaged } = await actions.list(
+          id,
+          payload.requestId === undefined ? {} : { requestId: String(payload.requestId) },
+        );
+        return { requests: requests.map((request) => fullRequest(request, now())), damaged };
       }
       case "repair":
         return await actions.repair(id, by);

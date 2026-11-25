@@ -34,7 +34,7 @@ async function refresh() {
       `${dashboard.manifest.title} · ${dashboard.manifest.machine}`;
     const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(dashboard.updatedAt)) / 60000));
     document.querySelector("#status").textContent =
-      `updated ${minutes} min ago · ${dashboard.status}${dashboard.handlerState === "archived" ? " · handler thread archived" : ""}${dashboard.ownerState === "archived" ? " · thread archived" : ""}`;
+      `updated ${minutes} min ago · ${dashboard.status}${["archived", "missing"].includes(dashboard.handlerState) ? " · handler unavailable" : ""}${dashboard.ownerState === "archived" ? " · thread archived" : ""}`;
     const owner = document.querySelector("#owner-thread");
     owner.hidden = !dashboard.ownerThreadUrl;
     if (dashboard.ownerThreadUrl) {

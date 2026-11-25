@@ -183,6 +183,7 @@ An earlier dashboard, outside this repository, already delivered button clicks t
 - **Run again** records a new request with the same snapshot and closes the old one as abandoned, pointing to the new one, so handling still never returns to `unclaimed`.
 - **Reader choices** (Retry, Abandon, Mark done, Run again) are posted from the dashboard page, to `/api/request`. They need no shell confirmation; a rerun of a `confirm` action waits for confirmation again.
 - **Escape** closes the shell's confirmation box and leaves the request waiting, so the page can ask again; only Cancel abandons it.
+- **Handler availability.** The thread CLI reports an archived thread as `not-found`, so a click is refused when the handler reads as missing or archived, or cannot be read on this machine. When SSH cannot reach the handler's machine, the click is accepted and delivery's reachability check retries it.
 - **"Not polling"** for a pull handler is measured from this hub's memory, so it also shows for 24 hours after the hub restarts.
 - **Repair** keeps the records that still apply and marks every open unclaimed request ambiguous, so nothing is resent automatically. It cannot recover a lost claim record.
 

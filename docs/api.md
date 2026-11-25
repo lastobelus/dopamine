@@ -123,7 +123,7 @@ A dashboard's own hub keeps its action requests in `actions.jsonl` beside its da
 1. Returns the existing request for a known `clickId` whose click is identical, field for field; the same ID with a different click is refused (409).
 2. Checks that the action is declared for that collection and scope, and that the target still has the given revision (409 "This changed; look again").
 3. Checks the payload against `maxPayloadBytes` (413). On a `questions` collection, a payload `answer` must be one of the item's option labels.
-4. Checks that the handler can take work: a thread handler's environment must be configured and the thread must not be archived. A pull handler always can.
+4. Checks that the handler can take work. A thread handler's environment must be configured, and the thread CLI must read the thread as existing and not archived (it reports an archived thread as `not-found`). If SSH cannot reach the handler's machine, the click is accepted and delivery retries it. A pull handler always can take work.
 5. Applies `oncePerItem` (409 with `duplicateOf`).
 6. Records the request with a snapshot of the item (`{rev, value}`) or collection (`{rev, order}`), and the dashboard's handler at that moment.
 
@@ -137,7 +137,7 @@ A request has independent fields. `transport` is `awaiting-confirmation`, `queue
 
 A `confirm` action is recorded as `awaiting-confirmation`. `dopamine.act()` asks the shell, and the shell reads `GET /api/confirm/<key>/<requestId>` (through the peer channel for a peer dashboard) and draws a modal from the stored request, every field as text. Confirm stays disabled for half a second. Confirm and Cancel post with the exact control Origin and a JSON content type; forms, a missing, `null` or dashboard Origin, and the dashboard's own host are refused. Confirm moves the request to `queued`; Cancel abandons it. Escape closes the box and leaves the request waiting. Opened directly, without a shell, `act()` navigates to `<shell>?dopamine-confirm=<requestId>`, and the shell draws the box if that request belongs to its dashboard and still awaits confirmation.
 
-A question with a confirmed answer on its way leaves the index's **Needs you**; a cancelled or abandoned one returns.
+A question with a confirmed answer (a payload `answer`) to its current revision leaves the index's **Needs you**; it returns if the answer is cancelled or abandoned, or the question changes.
 
 ### Delivery
 
@@ -162,7 +162,7 @@ A failure is retried automatically only with affirmative evidence that nothing w
 
 `dash action ack <name> <requestId> --result-json '{"status": "done", "result": {"label": "...", "href": "..."}}'` closes a claimed request, once, from the handler that claimed it. `href` may use `http`, `https` or `t3-thread`. `status: "unknown"` says the handler could not tell whether the work ran; the page then offers Mark done, Run again and Abandon.
 
-Claim, ack and show also find requests in removed dashboards.
+Claim, ack and `show <name> <requestId>` also find requests in removed copies of the dashboard, including when the ID is in use again. `show <name>` alone lists the live dashboard's requests.
 
 ### Pull handlers
 
