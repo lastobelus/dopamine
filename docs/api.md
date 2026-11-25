@@ -116,7 +116,7 @@ The deployer snapshots a clean Git commit, records file hashes, generates a pinn
 
 ## Actions
 
-A dashboard's own hub keeps its action requests in `actions.jsonl` beside its data, as append-only, fsynced records. Each change is a locked append that checks the request's current state first.
+A dashboard's own hub keeps its action requests in `actions.jsonl` beside its data, as append-only, fsynced records. Under the dashboard's lock, every writer checks each new record's fields and transition against the current state before appending it. This includes pull leases, forced removal and the records repair adds.
 
 ### Clicks
 
@@ -146,6 +146,8 @@ A question with a confirmed answer (a payload `answer`) to its current revision 
 The hub delivers to thread handlers with `<threadCommand> send <threadId> - --json`, one queue per handler thread, oldest first. The message is one line, `[dashboard action] {dashboard, requestId, target, action, payload}`, followed by how to claim it. A reply with a `messageId` is a receipt (`runId` is recorded when present) and marks the request `delivered`.
 
 A failure is retried automatically only with affirmative evidence that nothing was sent: before each send, a remote handler's host must answer a separate SSH check, and a local command must exist. Such a failure is `failed`, retried after 1, 5 and 15 minutes, then hourly, and `stalled` after five tries. A failed request keeps its place: later requests to the same thread wait behind it. Anything else, such as a non-zero exit, a reply without a receipt, a 30-second timeout, or a `sending` record found at start-up, is `ambiguous` and is never resent automatically.
+
+A send start or a failed reachability check adds exactly one attempt under the dashboard's lock. If a check fails after the reader chooses Retry, it counts against the fresh budget. Replay requires the same one-at-a-time count, so an older record that skipped attempts across Retry marks the log damaged.
 
 ### Reader choices
 

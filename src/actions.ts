@@ -288,14 +288,11 @@ function canApplyTransport(request: ActionRequest, event: TransportEvent): boole
     case "failed":
     case "stalled": {
       const { attempts } = event;
-      // A reachability check counts from the worker's snapshot, which can predate Retry.
       return (
         !pull &&
         ["queued", "failed"].includes(from) &&
         transportFields(event, "attempts", "nextAttemptAt", "error") &&
-        attempts !== undefined &&
-        Number.isSafeInteger(attempts) &&
-        attempts >= 1 &&
+        attempts === request.attempts + 1 &&
         typeof event.error === "string" &&
         (event.transport === "failed"
           ? attempts < MAX_DELIVERY_ATTEMPTS && logDate(event.nextAttemptAt)
@@ -543,7 +540,19 @@ async function prepareAppend(directory: string): Promise<Log> {
   return log;
 }
 
-async function append(directory: string, events: LogEvent[]): Promise<void> {
+/** Check every record in order against the same JSON and state that replay will see. */
+function encodeEvents(log: Log, events: LogEvent[]): string {
+  return events
+    .map((event) => {
+      const line = JSON.stringify(event);
+      apply(log, JSON.parse(line));
+      return `${line}\n`;
+    })
+    .join("");
+}
+
+async function append(directory: string, log: Log, events: LogEvent[]): Promise<void> {
+  const records = encodeEvents(log, events);
   const path = join(directory, LOG);
   let created = false;
   try {
@@ -557,7 +566,7 @@ async function append(directory: string, events: LogEvent[]): Promise<void> {
     0o600,
   );
   try {
-    await handle.writeFile(events.map((event) => `${JSON.stringify(event)}\n`).join(""));
+    await handle.writeFile(records);
     await handle.sync();
   } finally {
     await handle.close();
@@ -579,14 +588,14 @@ export async function prepareRemoval(directory: string, force: boolean, by: stri
   if (!force)
     throw new HttpError(409, "This dashboard has open action requests; remove it with --force");
   const at = new Date().toISOString();
-  await prepareAppend(directory);
+  const prepared = await prepareAppend(directory);
   const events: LogEvent[] = [];
   for (const { requestId, handling } of pending) {
     if (handling === "unclaimed")
       events.push({ event: "transport", requestId, transport: "abandoned", at, by });
     events.push({ event: "handling", requestId, handling: "abandoned", at, by });
   }
-  await append(directory, events);
+  await append(directory, prepared, events);
 }
 
 export async function hasOpenRequests(directory: string): Promise<boolean> {
@@ -765,8 +774,7 @@ export class ActionStore {
         transport: action.confirm ? "awaiting-confirmation" : "queued",
       };
       const event: RequestEvent = { event: "request", request };
-      apply(log, event);
-      await append(directory, [event]);
+      await append(directory, log, [event]);
       return { request: requests.get(request.requestId)!, existing: false };
     });
   }
@@ -920,8 +928,7 @@ export class ActionStore {
       const request = log.requests.get(requestId);
       if (!request) throw new HttpError(404, "Action request not found");
       const changes = events(request, this.at());
-      for (const change of changes) apply(log, change);
-      await append(located.directory, changes);
+      await append(located.directory, log, changes);
       return request;
     });
   }
@@ -988,9 +995,9 @@ export class ActionStore {
       const directory = join(this.store.root, id);
       await this.store.current(id);
       this.polls.set(`${id}\0${name}`, this.now());
-      const { requests } = await prepareAppend(directory);
+      const log = await prepareAppend(directory);
       const now = this.now();
-      const request = [...requests.values()].find(
+      const request = [...log.requests.values()].find(
         (candidate) =>
           handlerIdentity(candidate.handler) === claimant &&
           candidate.handling === "unclaimed" &&
@@ -999,17 +1006,17 @@ export class ActionStore {
       );
       if (!request) return null;
       const leaseUntil = new Date(now + LEASE_MS).toISOString();
-      await append(directory, [
+      await append(directory, log, [
         {
           event: "transport",
           requestId: request.requestId,
           transport: "delivered",
-          at: this.at(),
+          at: new Date(now).toISOString(),
           by: claimant,
           leaseUntil,
         },
       ]);
-      return { ...request, transport: "delivered", mayBeDelivered: true, leaseUntil };
+      return request;
     });
   }
 
@@ -1040,6 +1047,21 @@ export class ActionStore {
       }
       const setAside = damaged.length + Number(tail.length > 0);
       if (!setAside) return { kept: kept.length, setAside };
+      const at = this.at();
+      const recovery = [...log.requests.values()]
+        .filter(
+          (request) =>
+            request.handling === "unclaimed" && REPAIRABLE_TRANSPORTS.has(request.transport),
+        )
+        .map((request): TransportEvent => ({
+          event: "transport",
+          requestId: request.requestId,
+          transport: "ambiguous",
+          at,
+          by,
+          error: REPAIR_ERROR,
+        }));
+      const recovered = encodeEvents(log, recovery);
       if (tail.length) await writeTail(directory, tail);
       if (damaged.length)
         await writeSide(
@@ -1048,25 +1070,9 @@ export class ActionStore {
         );
       // Make the saved records durable before replacing the original log.
       await syncDirectory(directory);
-      const at = this.at();
-      const recovered = [...log.requests.values()]
-        .filter(
-          (request) =>
-            request.handling === "unclaimed" && REPAIRABLE_TRANSPORTS.has(request.transport),
-        )
-        .map((request) =>
-          JSON.stringify({
-            event: "transport",
-            requestId: request.requestId,
-            transport: "ambiguous",
-            at,
-            by,
-            error: REPAIR_ERROR,
-          } satisfies TransportEvent),
-        );
       const temporary = join(dirname(path), `.tmp-${randomUUID()}`);
       try {
-        await writeSide(temporary, [...kept, ...recovered].map((line) => `${line}\n`).join(""));
+        await writeSide(temporary, kept.map((line) => `${line}\n`).join("") + recovered);
         await rename(temporary, path);
         await syncDirectory(directory);
       } finally {
@@ -1117,12 +1123,15 @@ export class ActionStore {
     }
   }
 
-  /** Records a send's outcome. A transport record never changes handling. */
+  /** Computes a delivery outcome from current state under the dashboard lock. */
   async recordTransport(
     id: string,
     requestId: string,
     from: Transport[],
-    change: Omit<TransportEvent, "event" | "requestId" | "at">,
+    change: (
+      request: ActionRequest,
+      at: string,
+    ) => Omit<TransportEvent, "event" | "requestId" | "at">,
   ): Promise<void> {
     try {
       await this.change(
@@ -1130,7 +1139,7 @@ export class ActionStore {
         requestId,
         (request, at) => {
           if (!from.includes(request.transport)) throw new HttpError(409, "skip");
-          return [{ event: "transport", requestId, at, ...change }];
+          return [{ event: "transport", requestId, at, ...change(request, at) }];
         },
         {},
       );
@@ -1144,9 +1153,9 @@ export class ActionStore {
     for (const { id, requests } of await this.liveRequests())
       for (const request of requests)
         if (request.transport === "sending")
-          await this.recordTransport(id, request.requestId, ["sending"], {
+          await this.recordTransport(id, request.requestId, ["sending"], () => ({
             transport: "ambiguous",
             error: "The hub stopped during this send",
-          });
+          }));
   }
 }

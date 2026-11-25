@@ -139,7 +139,7 @@ Each request has independent fields, reduced from `actions.jsonl` in order:
 - **`mayBeDelivered`**: set the first time any attempt reaches `sending`, or a pull lease is issued; never cleared.
 - **`handling`**: `unclaimed` → `claimed` → `done`, or `unknown`, or `abandoned`. Written only by `dash action claim`, `ack` and the reader's choices.
 
-A transport record never changes `handling`, and once `handling` leaves `unclaimed` it never returns. Every transition is a locked append that checks the current reduced state first.
+A transport record never changes `handling`, and once `handling` leaves `unclaimed` it never returns. Every writer checks the new record's fields and transition against the current reduced state under the lock before saving it. That includes pull leases, forced removal and the records repair adds.
 
 ### Delivering
 
@@ -147,7 +147,7 @@ One queue per handler thread. Delivery uses `lastcode-thread send <threadId> - -
 
 1. Under the lock: skip the request if `handling` is not `unclaimed` or the dashboard is gone; otherwise append `transport: sending` and `fsync`. Release the lock and send.
 2. Send `[dashboard action] {dashboard, requestId, target, action, payload}` to the handler's machine, locally or over SSH. Record `transport: delivered` with the receipt.
-3. **Retry automatically only with affirmative evidence nothing was sent**: for another machine, a separate SSH reachability check before the send fails. No CLI outcome counts as evidence. Then `failed`, retried after 1, 5 and 15 minutes, then hourly, `stalled` after five attempts until Retry or Abandon.
+3. **Retry automatically only with affirmative evidence nothing was sent**: for another machine, a separate SSH reachability check before the send fails. No CLI outcome counts as evidence. Then `failed`, retried after 1, 5 and 15 minutes, then hourly, `stalled` after five attempts until Retry or Abandon. Both a send start and a reachability failure add exactly one attempt under the lock. A check that fails after Retry counts against the fresh budget. Replay rejects any of those records that skips or repeats an attempt count.
 4. **Anything else is ambiguous** (a failure during the send, a timeout, an unparseable reply, a `sending` record with no outcome at start-up): never resent automatically. The page shows Retry and Abandon while `handling` is `unclaimed`; Retry sends again with the same request ID.
 
 ### Handling (the at-most-once rule)
