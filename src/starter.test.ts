@@ -31,7 +31,11 @@ class Element {
     if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this);
     this.parent = undefined;
   }
-  addEventListener() {}
+  listeners: Record<string, () => void> = {};
+  addEventListener(name: string, callback: () => void) {
+    this.listeners[name] = callback;
+  }
+  setAttribute() {}
   all(): Element[] {
     return [this, ...this.children.flatMap((child) => child.all())];
   }
@@ -39,7 +43,10 @@ class Element {
     return this.textContent + this.children.map((child) => child.text()).join(" ");
   }
 }
-async function page() {
+async function page(
+  dopamine: Record<string, unknown> = {},
+  meta: unknown = { manifest: { title: "Example" } },
+) {
   const nodes = Object.fromEntries(
     ["collections", "title", "updated", "error", "empty"].map((id) => [id, new Element("div")]),
   );
@@ -63,10 +70,11 @@ async function page() {
     clearTimeout() {},
     dopamine: {
       view: { get: async () => ({}), set: async () => ({}) },
-      meta: async () => ({ manifest: { title: "Example" } }),
+      meta: async () => meta,
       subscribe: (callback: (data: unknown) => void) => {
         render = callback;
       },
+      ...dopamine,
     },
   });
   await setImmediate();
@@ -147,5 +155,87 @@ describe("starter rendering", () => {
     expect(root.text()).toContain("Retained");
     expect(root.text()).toContain("Visible context");
     expect(root.all().filter((node) => node.tag === "article")).toHaveLength(3);
+  });
+  it("offers each answer as a button and shows each request's state with the reader's choices", async () => {
+    const acted: unknown[][] = [];
+    const chosen: unknown[][] = [];
+    let showRequests: ((requests: unknown[]) => void) | undefined;
+    const { render, root } = await page(
+      {
+        act: async (...args: unknown[]) => {
+          acted.push(args);
+        },
+        choose: async (...args: unknown[]) => {
+          chosen.push(args);
+        },
+        watchRequests: (callback: (requests: unknown[]) => void) => {
+          showRequests = callback;
+        },
+      },
+      {
+        manifest: {
+          title: "Example",
+          collections: { needs: { type: "questions" } },
+          actions: [{ name: "decide", label: "Decide", collections: ["needs"], scope: "item" }],
+        },
+        handlerState: "available",
+      },
+    );
+    render({
+      rev: 4,
+      collections: {
+        needs: {
+          rev: 4,
+          order: ["q1"],
+          items: {
+            q1: item(4, { title: "Ship?", options: [{ label: "Yes" }, { label: "<b>No</b>" }] }),
+          },
+        },
+      },
+    });
+    const buttons = root
+      .all()
+      .filter((node) => node.tag === "button" && node.textContent !== "Cite");
+    expect(buttons.map((node) => node.textContent)).toEqual(["Yes", "<b>No</b>"]);
+    buttons[1]!.listeners.click!();
+    await setImmediate();
+    expect(acted).toEqual([
+      [
+        "decide",
+        { collection: "needs", key: "q1" },
+        { answer: "<b>No</b>" },
+        { confirmDuplicate: false },
+      ],
+    ]);
+    showRequests!([
+      {
+        requestId: "r-1",
+        label: "Decide",
+        payload: { answer: "<b>No</b>" },
+        state: "ambiguous",
+        target: { collection: "needs", key: "q1" },
+        error: "The send timed out",
+      },
+    ]);
+    const text = root.text();
+    expect(text).toContain("Decide: <b>No</b> · May have been delivered");
+    expect(text).toContain("The send timed out");
+    const retry = root.all().find((node) => node.textContent === "Retry")!;
+    retry.listeners.click!();
+    expect(chosen).toEqual([["r-1", "retry"]]);
+    showRequests!([
+      {
+        requestId: "r-1",
+        label: "Decide",
+        payload: { answer: "Yes" },
+        state: "done",
+        target: { collection: "needs", key: "q1" },
+        result: { label: "Shipped", href: "javascript:alert(1)" },
+      },
+    ]);
+    expect(root.text()).toContain("Shipped");
+    expect(root.all().some((node) => node.tag === "a" && node.textContent === "Shipped")).toBe(
+      false,
+    );
   });
 });

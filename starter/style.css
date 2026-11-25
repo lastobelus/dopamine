@@ -120,3 +120,48 @@ body > a {
     --accent: #9ccbac;
   }
 }
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.actions button,
+.request button {
+  font: inherit;
+  font-size: 13px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--fg);
+  cursor: pointer;
+}
+.actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.request {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  font-size: 13px;
+}
+.request small {
+  flex-basis: 100%;
+}
+.request.done {
+  border-color: var(--accent);
+}
+.request.ambiguous,
+.request.stalled,
+.request.unknown,
+.request.unresolved,
+.request.notice {
+  border-color: #b88b37;
+}

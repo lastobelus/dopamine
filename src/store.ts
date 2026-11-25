@@ -4,6 +4,7 @@ import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, stat } from "
 import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { collectionValue, HttpError, json, manifest, object, slug, text } from "./model.ts";
+import { hasOpenRequests, prepareRemoval } from "./actions.ts";
 import type {
   DashboardCollection,
   DashboardData,
@@ -163,6 +164,30 @@ export class DashboardStore {
     this.machine = slug(machine, "Machine");
   }
 
+  /** Runs an operation under this dashboard's lock, the only way its files change. */
+  async exclusive<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    return await this.locked(id, operation);
+  }
+
+  /** The dashboard's record; call it inside `exclusive`. */
+  async current(id: string): Promise<DashboardRecord> {
+    return await this.readRecord(id);
+  }
+
+  async ids(): Promise<string[]> {
+    await noSymlinks(this.root);
+    return (await readdir(this.root, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.name))
+      .map((entry) => entry.name);
+  }
+
+  /** Removed copies of a dashboard, newest first. */
+  async removedDirectories(id: string): Promise<string[]> {
+    return (await this.removedCopies())
+      .filter((copy) => copy.id === id)
+      .map((copy) => join(this.root, ".removed", copy.name));
+  }
+
   private async locked<T>(id: string, operation: () => Promise<T>): Promise<T> {
     slug(id, "Dashboard id");
     const previous = this.locks.get(id) ?? Promise.resolve();
@@ -198,6 +223,8 @@ export class DashboardStore {
             if (missing(error)) return;
             throw error;
           }
+          // A handler may still claim or acknowledge an open request in a removed dashboard.
+          if (await hasOpenRequests(path)) return;
           await rm(path, { recursive: true, force: true });
           await syncDirectory(join(this.root, ".removed"));
         });
@@ -504,10 +531,11 @@ export class DashboardStore {
     });
   }
 
-  async remove(id: string, force = false): Promise<void> {
+  async remove(id: string, force = false, by = "reader"): Promise<void> {
     if (typeof force !== "boolean") throw new HttpError(400, "Force must be a boolean");
     await this.locked(id, async () => {
       await this.readRecord(id);
+      await prepareRemoval(join(this.root, id), force, by);
       const latest = (await this.removedCopies()).find((copy) => copy.id === id);
       const time = Math.max(Date.now(), (latest?.time ?? 0) + 1);
       await rename(

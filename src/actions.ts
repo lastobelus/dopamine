@@ -1,0 +1,907 @@
+/* eslint-disable no-await-in-loop -- Log operations on one dashboard run in order under its lock. */
+import { constants } from "node:fs";
+import { lstat, open, rename, rm } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
+import { HttpError, isPull, json, object, text } from "./model.ts";
+import type { DashboardRecord, Handler, JsonValue } from "./model.ts";
+import type { DashboardStore } from "./store.ts";
+
+export type Transport =
+  | "awaiting-confirmation"
+  | "queued"
+  | "sending"
+  | "delivered"
+  | "failed"
+  | "stalled"
+  | "ambiguous"
+  | "abandoned";
+type Handling = "unclaimed" | "claimed" | "done" | "unknown" | "abandoned";
+
+export interface ActionTarget {
+  collection: string;
+  key?: string;
+  itemRev?: number;
+  collectionRev?: number;
+}
+
+interface ActionResult {
+  label: string;
+  href?: string;
+}
+
+/** One request, reduced from the events in `actions.jsonl` in order. */
+export interface ActionRequest {
+  requestId: string;
+  clickId: string;
+  click: string;
+  dashboard: string;
+  target: ActionTarget;
+  snapshot: JsonValue;
+  action: string;
+  label: string;
+  payload: JsonValue;
+  handler: Handler;
+  confirm: boolean;
+  at: string;
+  rerunOf?: string;
+  transport: Transport;
+  mayBeDelivered: boolean;
+  handling: Handling;
+  attempts: number;
+  nextAttemptAt?: string;
+  error?: string;
+  receipt?: { messageId: string; runId?: string };
+  leaseUntil?: string;
+  claimedBy?: string;
+  claimedAt?: string;
+  result?: ActionResult;
+  rerunAs?: string;
+  updatedAt: string;
+}
+
+interface RequestEvent {
+  event: "request";
+  request: Omit<
+    ActionRequest,
+    | "transport"
+    | "mayBeDelivered"
+    | "handling"
+    | "attempts"
+    | "updatedAt"
+    | "nextAttemptAt"
+    | "error"
+    | "receipt"
+    | "leaseUntil"
+    | "claimedBy"
+    | "claimedAt"
+    | "result"
+    | "rerunAs"
+  > & { transport: "queued" | "awaiting-confirmation" };
+}
+interface TransportEvent {
+  event: "transport";
+  requestId: string;
+  transport: Transport;
+  at: string;
+  by?: string;
+  attempts?: number;
+  nextAttemptAt?: string | null;
+  error?: string | null;
+  receipt?: { messageId: string; runId?: string };
+  leaseUntil?: string;
+}
+interface HandlingEvent {
+  event: "handling";
+  requestId: string;
+  handling: Handling;
+  at: string;
+  by: string;
+  result?: ActionResult;
+  rerunAs?: string;
+}
+type LogEvent = RequestEvent | TransportEvent | HandlingEvent;
+
+const LOG = "actions.jsonl";
+/** A claim with no ack after this long shows as unresolved. */
+const UNRESOLVED_MS = 30 * 60 * 1000;
+const LEASE_MS = 5 * 60 * 1000;
+const TRANSPORTS = new Set<Transport>([
+  "awaiting-confirmation",
+  "queued",
+  "sending",
+  "delivered",
+  "failed",
+  "stalled",
+  "ambiguous",
+  "abandoned",
+]);
+const HANDLINGS = new Set<Handling>(["unclaimed", "claimed", "done", "unknown", "abandoned"]);
+
+/** JSON with object keys sorted at every level, so equal clicks compare equal. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object")
+    return `{${Object.keys(value)
+      .toSorted()
+      .map((key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`)
+      .join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function handlerIdentity(handler: Handler): string {
+  return isPull(handler) ? `pull:${handler.name}` : `${handler.environmentId}/${handler.threadId}`;
+}
+
+/** A request is open while it may still be delivered, handled or need the reader. */
+function isOpen(request: ActionRequest): boolean {
+  if (["done", "abandoned"].includes(request.handling)) return false;
+  return request.handling !== "unclaimed" || request.transport !== "abandoned";
+}
+
+/** What the page shows for a request: its handling once claimed, otherwise its transport. */
+function requestState(request: ActionRequest, now = Date.now()): string {
+  if (request.handling === "claimed")
+    return now - Date.parse(request.claimedAt!) > UNRESOLVED_MS ? "unresolved" : "claimed";
+  if (request.handling !== "unclaimed") return request.handling;
+  return request.transport;
+}
+
+/** The fields a page may read about a request; the snapshot and receipt stay in the log. */
+export function publicRequest(request: ActionRequest, now = Date.now()) {
+  return {
+    requestId: request.requestId,
+    action: request.action,
+    label: request.label,
+    target: request.target,
+    payload: request.payload,
+    at: request.at,
+    state: requestState(request, now),
+    transport: request.transport,
+    handling: request.handling,
+    mayBeDelivered: request.mayBeDelivered,
+    attempts: request.attempts,
+    ...(request.nextAttemptAt ? { nextAttemptAt: request.nextAttemptAt } : {}),
+    ...(request.error ? { error: request.error } : {}),
+    ...(request.result ? { result: request.result } : {}),
+    ...(request.rerunOf ? { rerunOf: request.rerunOf } : {}),
+    ...(request.rerunAs ? { rerunAs: request.rerunAs } : {}),
+  };
+}
+
+function apply(requests: Map<string, ActionRequest>, raw: unknown): void {
+  const event = object(raw, "Log event") as unknown as LogEvent;
+  if (event.event === "request") {
+    const request = object(event.request, "Logged request") as unknown as RequestEvent["request"];
+    if (
+      typeof request.requestId !== "string" ||
+      requests.has(request.requestId) ||
+      typeof request.clickId !== "string" ||
+      !["queued", "awaiting-confirmation"].includes(request.transport)
+    )
+      throw new Error("Invalid request record");
+    requests.set(request.requestId, {
+      ...request,
+      mayBeDelivered: false,
+      handling: "unclaimed",
+      attempts: 0,
+      updatedAt: request.at,
+    });
+    return;
+  }
+  const request = requests.get(event.requestId);
+  if (!request || typeof event.at !== "string") throw new Error("Event for an unknown request");
+  request.updatedAt = event.at;
+  if (event.event === "transport") {
+    if (!TRANSPORTS.has(event.transport)) throw new Error("Invalid transport");
+    request.transport = event.transport;
+    if (event.transport === "sending" || event.leaseUntil) request.mayBeDelivered = true;
+    if (event.attempts !== undefined) request.attempts = event.attempts;
+    for (const field of ["nextAttemptAt", "error"] as const) {
+      if (event[field] === null) delete request[field];
+      else if (event[field] !== undefined) request[field] = event[field];
+    }
+    if (event.receipt) request.receipt = event.receipt;
+    if (event.leaseUntil) request.leaseUntil = event.leaseUntil;
+    return;
+  }
+  if (event.event === "handling") {
+    if (!HANDLINGS.has(event.handling)) throw new Error("Invalid handling");
+    request.handling = event.handling;
+    if (event.handling === "claimed") {
+      request.claimedBy = event.by;
+      request.claimedAt = event.at;
+    }
+    if (event.result) request.result = event.result;
+    if (event.rerunAs) request.rerunAs = event.rerunAs;
+    return;
+  }
+  throw new Error("Unknown log event");
+}
+
+interface Log {
+  requests: Map<string, ActionRequest>;
+  damaged: boolean;
+}
+
+async function readBytes(path: string): Promise<Buffer> {
+  try {
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      return await handle.readFile();
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return Buffer.alloc(0);
+    throw error;
+  }
+}
+
+/** Reads a log; an incomplete final line is ignored here and set aside before the next append. */
+async function readLog(directory: string): Promise<Log> {
+  const bytes = await readBytes(join(directory, LOG));
+  const end = bytes.lastIndexOf(10) + 1;
+  const requests = new Map<string, ActionRequest>();
+  let damaged = false;
+  for (const line of bytes.subarray(0, end).toString("utf8").split("\n")) {
+    if (!line) continue;
+    try {
+      apply(requests, JSON.parse(line));
+    } catch {
+      damaged = true;
+    }
+  }
+  return { requests, damaged };
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, constants.O_RDONLY);
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function writeSide(path: string, body: Buffer | string): Promise<void> {
+  const handle = await open(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    await handle.writeFile(body);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Sets aside an incomplete final record, then refuses to continue a damaged log. */
+async function prepareAppend(directory: string): Promise<Log> {
+  const path = join(directory, LOG);
+  const bytes = await readBytes(path);
+  const end = bytes.lastIndexOf(10) + 1;
+  if (end < bytes.length) {
+    await writeSide(
+      join(directory, `actions.tail-${Date.now()}-${randomUUID()}`),
+      bytes.subarray(end),
+    );
+    const handle = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW);
+    try {
+      await handle.truncate(end);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+  const log = await readLog(directory);
+  if (log.damaged)
+    throw new HttpError(503, "Action log damaged; run dash action repair for this dashboard");
+  return log;
+}
+
+async function append(directory: string, events: LogEvent[]): Promise<void> {
+  const path = join(directory, LOG);
+  let created = false;
+  try {
+    await lstat(path);
+  } catch {
+    created = true;
+  }
+  const handle = await open(
+    path,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    await handle.writeFile(events.map((event) => `${JSON.stringify(event)}\n`).join(""));
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  if (created) await syncDirectory(directory);
+}
+
+/** Before removal: refuse while work may be running, and with force abandon what was never sent. */
+export async function prepareRemoval(directory: string, force: boolean, by: string): Promise<void> {
+  const pending = [...(await readLog(directory)).requests.values()].filter(isOpen);
+  if (!pending.length) return;
+  if (!force)
+    throw new HttpError(409, "This dashboard has open action requests; remove it with --force");
+  if (pending.some((request) => request.transport === "sending" || request.handling === "claimed"))
+    throw new HttpError(409, "An action request is being sent or handled; try again later");
+  const at = new Date().toISOString();
+  await prepareAppend(directory);
+  const events: LogEvent[] = [];
+  for (const { requestId, handling } of pending) {
+    if (handling === "unclaimed")
+      events.push({ event: "transport", requestId, transport: "abandoned", at, by });
+    events.push({ event: "handling", requestId, handling: "abandoned", at, by });
+  }
+  await append(directory, events);
+}
+
+export async function hasOpenRequests(directory: string): Promise<boolean> {
+  const log = await readLog(directory);
+  return log.damaged || [...log.requests.values()].some(isOpen);
+}
+
+function integer(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new HttpError(400, `${label} must be a nonnegative integer`);
+  return value;
+}
+
+function resultValue(value: unknown): ActionResult | undefined {
+  if (value === undefined) return undefined;
+  const input = object(value, "Result");
+  if (Object.keys(input).some((key) => !["label", "href"].includes(key)))
+    throw new HttpError(400, "Result has only label and href");
+  const result: ActionResult = { label: text(input.label, "Result label").slice(0, 500) };
+  if (input.href !== undefined) {
+    const href = text(input.href, "Result href");
+    let url: URL;
+    try {
+      url = new URL(href);
+    } catch {
+      throw new HttpError(400, "Result href must be a URL");
+    }
+    if (!["http:", "https:", "t3-thread:"].includes(url.protocol))
+      throw new HttpError(400, "Result href must use http, https or t3-thread");
+    result.href = url.href;
+  }
+  return result;
+}
+
+interface Located {
+  directory: string;
+  live: boolean;
+}
+
+/**
+ * Action requests: accepted from a page, confirmed in the shell, delivered by the worker,
+ * claimed and acknowledged by the handler. Every change is a locked append that checks the
+ * reduced state first.
+ */
+export class ActionStore {
+  readonly store: DashboardStore;
+  private readonly now: () => number;
+  private readonly polls = new Map<string, number>();
+
+  constructor(store: DashboardStore, now: () => number = Date.now) {
+    this.store = store;
+    this.now = now;
+  }
+
+  private at(): string {
+    return new Date(this.now()).toISOString();
+  }
+
+  private key(id: string): string {
+    return `${id}--${this.store.machine}`;
+  }
+
+  /** The live dashboard first, then removed copies, newest first. */
+  private async locate(id: string, requestId?: string): Promise<Located> {
+    const live = join(this.store.root, id);
+    const candidates: Located[] = [{ directory: live, live: true }];
+    for (const directory of await this.store.removedDirectories(id))
+      candidates.push({ directory, live: false });
+    for (const candidate of candidates) {
+      try {
+        await lstat(join(candidate.directory, "dashboard.json"));
+      } catch {
+        continue;
+      }
+      if (!requestId) return candidate;
+      if ((await readLog(candidate.directory)).requests.has(requestId)) return candidate;
+    }
+    throw new HttpError(404, requestId ? "Action request not found" : "Dashboard not found");
+  }
+
+  private async request(directory: string, requestId: string): Promise<ActionRequest> {
+    const request = (await prepareAppend(directory)).requests.get(requestId);
+    if (!request) throw new HttpError(404, "Action request not found");
+    return request;
+  }
+
+  async accept(
+    id: string,
+    input: unknown,
+    available: (handler: Handler) => Promise<boolean>,
+  ): Promise<{ request: ActionRequest; existing: boolean }> {
+    const click = object(input, "Click");
+    if (
+      Object.keys(click).some(
+        (field) => !["clickId", "action", "target", "payload", "confirmDuplicate"].includes(field),
+      )
+    )
+      throw new HttpError(400, "Unknown click field");
+    const clickId = text(click.clickId, "Click ID");
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(clickId))
+      throw new HttpError(400, "Click ID must be 8 to 128 letters, digits, - or _");
+    if (click.confirmDuplicate !== undefined && typeof click.confirmDuplicate !== "boolean")
+      throw new HttpError(400, "confirmDuplicate must be a boolean");
+    const payload = json(click.payload ?? null);
+    const fingerprint = canonical({
+      ...click,
+      payload,
+      confirmDuplicate: click.confirmDuplicate === true,
+    });
+    const { manifest } = await this.store.get(id);
+    const checked = manifest.handler;
+    const handlerUp = checked ? await available(checked) : false;
+    return await this.store.exclusive(id, async () => {
+      const directory = join(this.store.root, id);
+      const record = await this.store.current(id);
+      const { requests } = await prepareAppend(directory);
+      const previous = [...requests.values()].find((request) => request.clickId === clickId);
+      if (previous) {
+        if (previous.click !== fingerprint)
+          throw new HttpError(409, "This click ID was already used for a different click");
+        return { request: previous, existing: true };
+      }
+      const action = record.manifest.actions.find((entry) => entry.name === click.action);
+      if (!action) throw new HttpError(400, "Unknown action");
+      const target = this.target(record, action.scope, click.target);
+      if (!action.collections.includes(target.collection))
+        throw new HttpError(400, "This action is not declared for that collection");
+      const bytes = Buffer.byteLength(JSON.stringify(payload));
+      if (bytes > action.maxPayloadBytes)
+        throw new HttpError(413, `Payload exceeds ${action.maxPayloadBytes} bytes`);
+      const collection = record.data.collections[target.collection]!;
+      const item = target.key === undefined ? undefined : collection.items[target.key]!;
+      if (
+        item &&
+        record.manifest.collections[target.collection]?.type === "questions" &&
+        payload &&
+        typeof payload === "object" &&
+        !Array.isArray(payload) &&
+        "answer" in payload
+      ) {
+        const options = (item.value as { options: { label: string }[] }).options;
+        if (!options.some((option) => option.label === payload.answer))
+          throw new HttpError(400, "The answer must be one of the question's options");
+      }
+      const handler = record.manifest.handler;
+      if (!handler) throw new HttpError(409, "This dashboard has no handler for actions");
+      if (canonical(handler) !== canonical(checked))
+        throw new HttpError(409, "The handler changed; try again");
+      if (!handlerUp) throw new HttpError(409, "The handler thread is unavailable");
+      if (action.oncePerItem && click.confirmDuplicate !== true) {
+        const earlier = [...requests.values()].find(
+          (request) =>
+            request.action === action.name &&
+            request.target.collection === target.collection &&
+            request.target.key === target.key &&
+            request.handling !== "abandoned" &&
+            request.transport !== "abandoned",
+        );
+        if (earlier) {
+          const error = new HttpError(409, "Already requested; confirm to send it again");
+          error.duplicateOf = earlier.requestId;
+          throw error;
+        }
+      }
+      const at = this.at();
+      const request: RequestEvent["request"] = {
+        requestId: `r-${randomBytes(8).toString("hex")}`,
+        clickId,
+        click: fingerprint,
+        dashboard: this.key(id),
+        target,
+        snapshot: item
+          ? { rev: item.rev, value: item.value }
+          : { rev: collection.rev, order: collection.order },
+        action: action.name,
+        label: action.label,
+        payload,
+        handler,
+        confirm: action.confirm,
+        at,
+        transport: action.confirm ? "awaiting-confirmation" : "queued",
+      };
+      await append(directory, [{ event: "request", request }]);
+      const reduced = new Map<string, ActionRequest>();
+      apply(reduced, { event: "request", request });
+      return { request: reduced.get(request.requestId)!, existing: false };
+    });
+  }
+
+  private target(record: DashboardRecord, scope: string, value: unknown): ActionTarget {
+    const input = object(value, "Target");
+    const collection = text(input.collection, "Target collection");
+    const fields =
+      scope === "item" ? ["collection", "key", "itemRev"] : ["collection", "collectionRev"];
+    if (Object.keys(input).some((field) => !fields.includes(field)))
+      throw new HttpError(400, `A ${scope} action targets ${fields.join(", ")}`);
+    const current = Object.hasOwn(record.data.collections, collection)
+      ? record.data.collections[collection]
+      : undefined;
+    const changed = new HttpError(409, "This changed; look again");
+    if (scope === "item") {
+      const key = text(input.key, "Target key");
+      const itemRev = integer(input.itemRev, "Item revision");
+      const item = current && Object.hasOwn(current.items, key) ? current.items[key] : undefined;
+      if (!item || item.rev !== itemRev) throw changed;
+      return { collection, key, itemRev };
+    }
+    const collectionRev = integer(input.collectionRev, "Collection revision");
+    if (!current || current.rev !== collectionRev) throw changed;
+    return { collection, collectionRev };
+  }
+
+  async list(
+    id: string,
+    filter: { collection?: string; key?: string } = {},
+  ): Promise<{ requests: ActionRequest[]; damaged: boolean }> {
+    return await this.store.exclusive(id, async () => {
+      const { directory } = await this.locate(id);
+      const log = await readLog(directory);
+      return {
+        damaged: log.damaged,
+        requests: [...log.requests.values()].filter(
+          (request) =>
+            (filter.collection === undefined || request.target.collection === filter.collection) &&
+            (filter.key === undefined || request.target.key === filter.key),
+        ),
+      };
+    });
+  }
+
+  /** The shell's Confirm or Cancel, from the exact control origin. */
+  async decide(
+    id: string,
+    requestId: string,
+    decision: unknown,
+    by: string,
+  ): Promise<ActionRequest> {
+    if (decision !== "confirm" && decision !== "cancel")
+      throw new HttpError(400, "Decision must be confirm or cancel");
+    return await this.change(id, requestId, (request, at): LogEvent[] => {
+      if (request.transport !== "awaiting-confirmation")
+        throw new HttpError(409, "This request is not awaiting confirmation");
+      return decision === "confirm"
+        ? [{ event: "transport", requestId, transport: "queued", at, by }]
+        : [
+            { event: "transport", requestId, transport: "abandoned", at, by },
+            { event: "handling", requestId, handling: "abandoned", at, by },
+          ];
+    });
+  }
+
+  /** The reader's choices on a request the page shows: Retry, Abandon, Mark done, Run again. */
+  async choose(id: string, requestId: string, choice: unknown, by: string): Promise<ActionRequest> {
+    let rerun: RequestEvent["request"] | undefined;
+    const result = await this.change(id, requestId, (request, at): LogEvent[] => {
+      const unclaimed = request.handling === "unclaimed";
+      switch (choice) {
+        case "retry":
+          if (!unclaimed || !["failed", "stalled", "ambiguous"].includes(request.transport))
+            throw new HttpError(
+              409,
+              "Only an unclaimed failed, stalled or ambiguous request can be retried",
+            );
+          return [
+            {
+              event: "transport",
+              requestId,
+              transport: "queued",
+              at,
+              by,
+              attempts: 0,
+              error: null,
+              nextAttemptAt: null,
+            },
+          ];
+        case "abandon":
+          if (request.handling === "unknown")
+            return [{ event: "handling", requestId, handling: "abandoned", at, by }];
+          if (!unclaimed || ["sending", "abandoned"].includes(request.transport))
+            throw new HttpError(409, "This request can no longer be abandoned");
+          return [
+            { event: "transport", requestId, transport: "abandoned", at, by },
+            { event: "handling", requestId, handling: "abandoned", at, by },
+          ];
+        case "mark-done":
+          if (request.handling !== "unknown")
+            throw new HttpError(
+              409,
+              "Only a request the handler could not confirm can be marked done",
+            );
+          return [{ event: "handling", requestId, handling: "done", at, by }];
+        case "run-again": {
+          if (request.handling !== "unknown")
+            throw new HttpError(409, "Only a request the handler could not confirm can run again");
+          const newId = `r-${randomBytes(8).toString("hex")}`;
+          rerun = {
+            requestId: newId,
+            clickId: `rerun-${newId}`,
+            click: canonical({ rerunOf: requestId }),
+            dashboard: request.dashboard,
+            target: request.target,
+            snapshot: request.snapshot,
+            action: request.action,
+            label: request.label,
+            payload: request.payload,
+            handler: request.handler,
+            confirm: request.confirm,
+            at,
+            rerunOf: requestId,
+            transport: request.confirm ? "awaiting-confirmation" : "queued",
+          };
+          return [
+            { event: "handling", requestId, handling: "abandoned", at, by, rerunAs: newId },
+            { event: "request", request: rerun },
+          ];
+        }
+        default:
+          throw new HttpError(400, "Choice must be retry, abandon, mark-done or run-again");
+      }
+    });
+    if (!rerun) return result;
+    return (await this.list(id)).requests.find(
+      (request) => request.requestId === rerun!.requestId,
+    )!;
+  }
+
+  private async change(
+    id: string,
+    requestId: string,
+    events: (request: ActionRequest, at: string) => LogEvent[],
+    options: { live?: boolean } = { live: true },
+  ): Promise<ActionRequest> {
+    return await this.store.exclusive(id, async () => {
+      const located = await this.locate(id, requestId);
+      if (options.live && !located.live) throw new HttpError(404, "Dashboard was removed");
+      const request = await this.request(located.directory, requestId);
+      const changes = events(request, this.at());
+      await append(located.directory, changes);
+      const reduced = new Map([[requestId, structuredClone(request)]]);
+      for (const change of changes) if (change.event !== "request") apply(reduced, change);
+      return reduced.get(requestId)!;
+    });
+  }
+
+  /** The handler takes a request, exactly once. */
+  async claim(id: string, requestId: string, claimant: string): Promise<ActionRequest> {
+    return await this.change(
+      id,
+      requestId,
+      (request, at) => {
+        if (handlerIdentity(request.handler) !== claimant)
+          throw new HttpError(403, "Only the handler recorded for this request can claim it");
+        if (request.handling !== "unclaimed")
+          throw new HttpError(409, "This request was already claimed or closed");
+        if (request.transport === "abandoned")
+          throw new HttpError(409, "This request was abandoned");
+        if (!request.mayBeDelivered)
+          throw new HttpError(409, "This request has not been delivered");
+        return [{ event: "handling", requestId, handling: "claimed", at, by: claimant }];
+      },
+      {},
+    );
+  }
+
+  async ack(
+    id: string,
+    requestId: string,
+    claimant: string,
+    input: unknown,
+  ): Promise<ActionRequest> {
+    const body = object(input, "Ack");
+    if (Object.keys(body).some((key) => !["status", "result"].includes(key)))
+      throw new HttpError(400, "Ack has only status and result");
+    if (body.status !== "done" && body.status !== "unknown")
+      throw new HttpError(400, "Ack status must be done or unknown");
+    const result = resultValue(body.result);
+    return await this.change(
+      id,
+      requestId,
+      (request, at) => {
+        if (request.handling !== "claimed")
+          throw new HttpError(409, "Only a claimed request can be acknowledged, once");
+        if (request.claimedBy !== claimant)
+          throw new HttpError(403, "Only the handler that claimed this request can acknowledge it");
+        return [
+          {
+            event: "handling",
+            requestId,
+            handling: body.status as Handling,
+            at,
+            by: claimant,
+            ...(result ? { result } : {}),
+          },
+        ];
+      },
+      {},
+    );
+  }
+
+  /** A pull handler's next request, leased for five minutes. */
+  async next(id: string, name: string): Promise<ActionRequest | null> {
+    const claimant = `pull:${name}`;
+    return await this.store.exclusive(id, async () => {
+      const directory = join(this.store.root, id);
+      await this.store.current(id);
+      this.polls.set(`${id}\0${name}`, this.now());
+      const { requests } = await prepareAppend(directory);
+      const now = this.now();
+      const request = [...requests.values()].find(
+        (candidate) =>
+          handlerIdentity(candidate.handler) === claimant &&
+          candidate.handling === "unclaimed" &&
+          (candidate.transport === "queued" ||
+            (candidate.transport === "delivered" && Date.parse(candidate.leaseUntil!) <= now)),
+      );
+      if (!request) return null;
+      const leaseUntil = new Date(now + LEASE_MS).toISOString();
+      await append(directory, [
+        {
+          event: "transport",
+          requestId: request.requestId,
+          transport: "delivered",
+          at: this.at(),
+          by: claimant,
+          leaseUntil,
+        },
+      ]);
+      return { ...request, transport: "delivered", mayBeDelivered: true, leaseUntil };
+    });
+  }
+
+  /** When a pull handler last asked for work on this dashboard, if this hub saw it. */
+  lastPoll(id: string, name: string): number | undefined {
+    return this.polls.get(`${id}\0${name}`);
+  }
+
+  /** Repair a damaged log: keep the records that still apply, and send nothing automatically. */
+  async repair(id: string, by: string): Promise<{ kept: number; setAside: number }> {
+    return await this.store.exclusive(id, async () => {
+      const { directory } = await this.locate(id);
+      const path = join(directory, LOG);
+      const bytes = await readBytes(path);
+      let requests = new Map<string, ActionRequest>();
+      const kept: string[] = [];
+      const damaged: string[] = [];
+      for (const line of bytes.toString("utf8").split("\n")) {
+        if (!line) continue;
+        try {
+          const trial = structuredClone(requests);
+          apply(trial, JSON.parse(line));
+          requests = trial;
+          kept.push(line);
+        } catch {
+          damaged.push(line);
+        }
+      }
+      if (!damaged.length) return { kept: kept.length, setAside: 0 };
+      await writeSide(
+        join(directory, `actions.damaged-${Date.now()}-${randomUUID()}.jsonl`),
+        `${damaged.join("\n")}\n`,
+      );
+      const at = this.at();
+      const recovered = [...requests.values()]
+        .filter(
+          (request) =>
+            request.handling === "unclaimed" &&
+            ["queued", "sending", "failed", "delivered"].includes(request.transport),
+        )
+        .map((request) =>
+          JSON.stringify({
+            event: "transport",
+            requestId: request.requestId,
+            transport: "ambiguous",
+            at,
+            by,
+            error: "Action log was repaired; check before retrying",
+          } satisfies TransportEvent),
+        );
+      const temporary = join(dirname(path), `.tmp-${randomUUID()}`);
+      try {
+        await writeSide(temporary, [...kept, ...recovered].map((line) => `${line}\n`).join(""));
+        await rename(temporary, path);
+        await syncDirectory(directory);
+      } finally {
+        await rm(temporary, { force: true });
+      }
+      return { kept: kept.length, setAside: damaged.length };
+    });
+  }
+
+  // The delivery worker's steps. Each checks the reduced state under the lock first.
+
+  async liveRequests(): Promise<{ id: string; requests: ActionRequest[] }[]> {
+    const result: { id: string; requests: ActionRequest[] }[] = [];
+    for (const id of await this.store.ids()) {
+      try {
+        const log = await this.store.exclusive(id, () => readLog(join(this.store.root, id)));
+        if (!log.damaged) result.push({ id, requests: [...log.requests.values()] });
+      } catch {
+        /* A dashboard removed meanwhile has nothing left to deliver. */
+      }
+    }
+    return result;
+  }
+
+  /** Marks a send as started, if the request still wants one. */
+  async beginSend(id: string, requestId: string): Promise<ActionRequest | null> {
+    try {
+      return await this.change(id, requestId, (request, at) => {
+        if (
+          request.handling !== "unclaimed" ||
+          !["queued", "failed"].includes(request.transport) ||
+          isPull(request.handler)
+        )
+          throw new HttpError(409, "skip");
+        return [
+          {
+            event: "transport",
+            requestId,
+            transport: "sending",
+            at,
+            attempts: request.attempts + 1,
+          },
+        ];
+      });
+    } catch (error) {
+      if (error instanceof HttpError && [404, 409].includes(error.status)) return null;
+      throw error;
+    }
+  }
+
+  /** Records a send's outcome. A transport record never changes handling. */
+  async recordTransport(
+    id: string,
+    requestId: string,
+    from: Transport[],
+    change: Omit<TransportEvent, "event" | "requestId" | "at">,
+  ): Promise<void> {
+    try {
+      await this.change(
+        id,
+        requestId,
+        (request, at) => {
+          if (!from.includes(request.transport)) throw new HttpError(409, "skip");
+          return [{ event: "transport", requestId, at, ...change }];
+        },
+        {},
+      );
+    } catch (error) {
+      if (!(error instanceof HttpError && [404, 409].includes(error.status))) throw error;
+    }
+  }
+
+  /** At start-up, a send with no recorded outcome may have arrived: never resend it automatically. */
+  async recoverSending(): Promise<void> {
+    for (const { id, requests } of await this.liveRequests())
+      for (const request of requests)
+        if (request.transport === "sending")
+          await this.recordTransport(id, request.requestId, ["sending"], {
+            transport: "ambiguous",
+            error: "The hub stopped during this send",
+          });
+  }
+}

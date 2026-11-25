@@ -6,10 +6,22 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
-interface ThreadReference {
+export interface ThreadReference {
   environmentId: string;
   threadId: string;
   title?: string;
+}
+
+/** A handler with no inbox, which asks for work with `dash action next`. */
+export interface PullHandler {
+  kind: "pull";
+  name: string;
+}
+
+export type Handler = ThreadReference | PullHandler;
+
+export function isPull(handler: Handler): handler is PullHandler {
+  return "kind" in handler && handler.kind === "pull";
 }
 
 interface ManifestAction {
@@ -30,7 +42,7 @@ export interface Manifest {
   kind: "page" | "url";
   url: string | null;
   owner: ThreadReference | null;
-  handler: ThreadReference | null;
+  handler: Handler | null;
   staleAfterMinutes: number;
   pinned: boolean;
   collections: Record<string, { type: "questions" }>;
@@ -67,6 +79,7 @@ export interface DashboardRecord {
 export class HttpError extends Error {
   status: number;
   existing?: DashboardRecord;
+  duplicateOf?: string;
 
   constructor(status: number, message: string) {
     super(message);
@@ -156,6 +169,18 @@ function reference(value: unknown, label: string): ThreadReference | null {
   };
   if (input.title !== undefined) result.title = text(input.title, `${label} title`);
   return result;
+}
+
+function handlerReference(value: unknown): Handler | null {
+  if (value === null) return null;
+  const input = object(value, "Handler");
+  if (input.kind === undefined || input.kind === "thread") {
+    const { kind: _kind, ...thread } = input;
+    return reference(thread, "Handler");
+  }
+  if (input.kind !== "pull" || Object.keys(input).some((key) => !["kind", "name"].includes(key)))
+    throw new HttpError(400, "Handler must be a thread or {kind: pull, name}");
+  return { kind: "pull", name: slug(input.name, "Pull handler name") };
 }
 
 export function manifest(input: unknown, machine: string, previous?: Manifest): Manifest {
@@ -249,7 +274,7 @@ export function manifest(input: unknown, machine: string, previous?: Manifest): 
     kind,
     url: url as string | null,
     owner: reference(merged.owner ?? null, "Owner"),
-    handler: reference(merged.handler ?? null, "Handler"),
+    handler: handlerReference(merged.handler ?? null),
     staleAfterMinutes: nonnegative(
       merged.staleAfterMinutes === undefined ? 60 : merged.staleAfterMinutes,
       "Stale interval",

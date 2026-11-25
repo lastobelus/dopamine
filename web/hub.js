@@ -144,12 +144,21 @@ function remember() {
 
 function openQuestions(d) {
   const open = [];
+  // A question with a confirmed answer on its way no longer needs the reader.
+  const answered = new Set(
+    (d.pendingAnswers ?? []).map((entry) => JSON.stringify([entry.collection, entry.key])),
+  );
   for (const [name, declaration] of Object.entries(d.manifest.collections)) {
     if (declaration.type !== "questions") continue;
     const collection = d.data.collections[name];
     for (const key of collection?.order ?? []) {
       const item = collection.items[key];
-      if (item && (!item.value.status || item.value.status === "open")) open.push({ key, item });
+      if (
+        item &&
+        (!item.value.status || item.value.status === "open") &&
+        !answered.has(JSON.stringify([name, key]))
+      )
+        open.push({ key, item });
     }
   }
   return open;

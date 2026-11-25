@@ -437,6 +437,61 @@ a:hover {
 .shell [hidden] {
   display: none;
 }
+#confirm {
+  max-width: min(520px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--fg);
+  padding: 20px;
+}
+#confirm::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+#confirm h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+#confirm dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 16px 0;
+}
+#confirm dt {
+  color: var(--muted);
+}
+#confirm dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+#confirm-error {
+  color: var(--down);
+}
+.confirm-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.confirm-buttons button {
+  font: inherit;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--fg);
+  cursor: pointer;
+}
+#confirm-ok {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--card);
+}
+#confirm-ok:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #151d19;

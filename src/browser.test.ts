@@ -28,6 +28,7 @@ describe("shell framing changes", () => {
             removeAttribute(name: string) {
               delete nodes[selector]![name];
             },
+            addEventListener() {},
           }),
       },
       location,
@@ -248,5 +249,172 @@ describe("page metadata recovery", () => {
       message: { type: "dopamine:open", url: anchor.href },
       origin: "http://hub.localhost",
     });
+  });
+});
+
+async function shell(search = "") {
+  type Node = Record<string, any>;
+  const nodes: Record<string, Node> = {};
+  const listeners: Record<string, Record<string, () => void>> = {};
+  const node = (selector: string): Node =>
+    (nodes[selector] ??= {
+      hidden: true,
+      disabled: false,
+      open: false,
+      textContent: "",
+      children: [] as Node[],
+      removeAttribute() {},
+      replaceChildren(...children: Node[]) {
+        this.children = children;
+      },
+      addEventListener(name: string, callback: () => void) {
+        (listeners[selector] ??= {})[name] = callback;
+      },
+      showModal() {
+        this.open = true;
+      },
+      close() {
+        this.open = false;
+        listeners[selector]?.close?.();
+      },
+    });
+  const posted: { message: unknown; origin: string }[] = [];
+  const contentWindow = {
+    postMessage: (message: unknown, origin: string) => posted.push({ message, origin }),
+  };
+  nodes["#dashboard"] = { hidden: true, contentWindow };
+  const events: Record<string, (event: unknown) => void> = {};
+  const delayed: (() => void)[] = [];
+  const requests: { path: string; init?: { method?: string; body?: string } }[] = [];
+  const location = { pathname: "/d/example--workstation", search, hash: "" };
+  const hostile = '<img src=x onerror="alert(1)">';
+  const stored = {
+    request: {
+      requestId: "r-0123456789abcdef",
+      label: "Ship",
+      target: { collection: "needs", key: "q1" },
+      payload: { answer: hostile },
+      at: "2026-11-20T20:00:00.000Z",
+      state: "awaiting-confirmation",
+      transport: "awaiting-confirmation",
+    },
+    dashboard: { key: "example--workstation", title: hostile, machine: "workstation" },
+    item: hostile,
+    handler: "thread handler",
+  };
+  runInNewContext(await readFile(new URL("../web/shell.js", import.meta.url), "utf8"), {
+    document: {
+      querySelector: node,
+      createElement: (tag: string) => ({ tag, textContent: "" }),
+    },
+    location,
+    history: {
+      replaceState(_state: unknown, _unused: string, target: string) {
+        location.search = new URL(target, "http://hub.localhost").search;
+      },
+    },
+    URL,
+    URLSearchParams,
+    Intl,
+    addEventListener: (name: string, callback: (event: unknown) => void) => {
+      events[name] = callback;
+    },
+    setInterval() {},
+    setTimeout(callback: () => void) {
+      delayed.push(callback);
+    },
+    async fetch(path: string, init?: { method?: string; body?: string }) {
+      requests.push({ path, ...(init ? { init } : {}) });
+      if (path.startsWith("/api/shell/"))
+        return {
+          ok: true,
+          json: async () => ({
+            manifest: { kind: "page", title: "Example", machine: "workstation" },
+            origin: "http://example--workstation.hub.localhost",
+            updatedAt: new Date().toISOString(),
+            status: "fresh",
+            frameAllowed: true,
+          }),
+        };
+      if (init?.method === "POST")
+        return {
+          ok: true,
+          json: async () => ({ request: { ...stored.request, state: "queued" } }),
+        };
+      return { ok: true, json: async () => stored };
+    },
+  });
+  await setImmediate();
+  return {
+    nodes,
+    listeners,
+    events,
+    delayed,
+    requests,
+    posted,
+    contentWindow,
+    location,
+    hostile,
+  };
+}
+
+describe("shell confirmation", () => {
+  it("draws the stored request as text and enables Confirm only after a pause", async () => {
+    const view = await shell();
+    view.events.message!({
+      source: view.contentWindow,
+      origin: "http://example--workstation.hub.localhost",
+      data: { type: "dopamine:confirm", requestId: "r-0123456789abcdef" },
+    });
+    await setImmediate();
+    const dialog = view.nodes["#confirm"]!;
+    expect(dialog.open).toBe(true);
+    const fields = view.nodes["#confirm-fields"]!.children as {
+      tag: string;
+      textContent: string;
+    }[];
+    expect(
+      fields.filter((field) => field.tag === "dd").map((field) => field.textContent),
+    ).toContain(`${view.hostile} · workstation`);
+    expect(fields.every((field) => !("innerHTML" in field))).toBe(true);
+    expect(view.nodes["#confirm-ok"]!.disabled).toBe(true);
+    view.delayed.shift()!();
+    expect(view.nodes["#confirm-ok"]!.disabled).toBe(false);
+    view.listeners["#confirm-ok"]!.click!();
+    await setImmediate();
+    const post = view.requests.at(-1)!;
+    expect(post.path).toBe("/api/confirm/example--workstation/r-0123456789abcdef");
+    expect(JSON.parse(post.init!.body!)).toEqual({ decision: "confirm" });
+    expect(dialog.open).toBe(false);
+    expect(view.posted).toEqual([
+      {
+        message: { type: "dopamine:confirmed", requestId: "r-0123456789abcdef", state: "queued" },
+        origin: "http://example--workstation.hub.localhost",
+      },
+    ]);
+  });
+
+  it("ignores confirmation messages from anything but its own frame", async () => {
+    const view = await shell();
+    view.events.message!({
+      source: {},
+      origin: "http://example--workstation.hub.localhost",
+      data: { type: "dopamine:confirm", requestId: "r-0123456789abcdef" },
+    });
+    view.events.message!({
+      source: view.contentWindow,
+      origin: "http://other.hub.localhost",
+      data: { type: "dopamine:confirm", requestId: "r-0123456789abcdef" },
+    });
+    await setImmediate();
+    expect(view.nodes["#confirm"]?.open ?? false).toBe(false);
+  });
+
+  it("opens the box for a direct-mode confirmation and drops the parameter", async () => {
+    const view = await shell("?dopamine-confirm=r-0123456789abcdef&dopamine-path=%2Fdetails");
+    await setImmediate();
+    expect(view.nodes["#confirm"]!.open).toBe(true);
+    expect(new URLSearchParams(view.location.search).get("dopamine-confirm")).toBeNull();
+    expect(new URLSearchParams(view.location.search).get("dopamine-path")).toBe("/details");
   });
 });

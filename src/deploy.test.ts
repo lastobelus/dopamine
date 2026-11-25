@@ -293,8 +293,13 @@ describe("private-config deployment", () => {
       "Next fixture",
     );
     const secondCommit = await git("rev-parse", "HEAD");
+    const queued = join(cfg.dataRoot, "board", "actions.jsonl");
+    await mkdir(join(cfg.dataRoot, "board"), { recursive: true });
+    await writeFile(queued, '{"event":"request","request":{"requestId":"r-0"}}\n');
     expect(await deploy(cfgFile, { source })).toBe(secondCommit);
     expect(await deploy(cfgFile, { rollback: true })).toBe(firstCommit);
+    // Queued actions live with dashboard data, outside the deployment, so a rollback keeps them.
+    expect(await readFile(queued, "utf8")).toContain('"requestId":"r-0"');
     expect(await readFile(cfg.deploy.services[0]!.destination)).toEqual(oldService);
     expect((await execute(cfg.deploy.dashLink, ["list"])).stdout).toContain("retained");
     const backup = JSON.parse(

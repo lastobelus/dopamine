@@ -21,7 +21,27 @@ export interface HubConfig {
     threadCommand?: string[];
     projectIconCommand?: string[];
   };
+  threadEnvironments?: Record<string, ThreadEnvironment>;
   serviceHint?: string;
+}
+
+/** How the hub reaches one environment's thread CLI: locally, or on `host` over SSH. */
+export interface ThreadEnvironment {
+  threadCommand: string[];
+  host?: string;
+}
+
+/** The thread CLI for an environment: configured, or the adapter's own for its environment. */
+export function threadEnvironment(
+  config: HubConfig,
+  environmentId: string,
+): ThreadEnvironment | null {
+  const configured = config.threadEnvironments?.[environmentId];
+  if (configured) return configured;
+  const command = config.adapter?.threadCommand;
+  return command?.[0] && config.adapter?.environmentId === environmentId
+    ? { threadCommand: command }
+    : null;
 }
 
 export function loopback(url: URL): boolean {
@@ -64,6 +84,19 @@ export function validateConfig(value: unknown): HubConfig {
   for (const origin of Object.values(cfg.dashboardOrigins ?? {})) {
     const u = new URL(origin);
     if (u.protocol !== "http:" || u.origin !== origin) throw new Error("Invalid dashboard origin");
+  }
+  for (const entry of Object.values(cfg.threadEnvironments ?? {})) {
+    if (
+      !Array.isArray(entry?.threadCommand) ||
+      entry.threadCommand.length === 0 ||
+      entry.threadCommand.some(
+        (part) => typeof part !== "string" || !part || part.includes("\0"),
+      ) ||
+      entry.threadCommand[0]!.startsWith("-") ||
+      (entry.host !== undefined &&
+        (typeof entry.host !== "string" || !/^[A-Za-z0-9][A-Za-z0-9@._-]*$/.test(entry.host)))
+    )
+      throw new Error("Thread environments need a command array and an optional SSH host");
   }
   return cfg;
 }

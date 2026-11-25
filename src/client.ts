@@ -15,7 +15,7 @@ const MAX_UPLOAD = 16 * 1024 * 1024;
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const HELP = `Usage: dash [--config <path>] [--as <environment>/<thread>] <command>
 
-create <name> --title <title> [--owner <environment>/<thread>] [--handler <environment>/<thread>]
+create <name> --title <title> [--owner <environment>/<thread>] [--handler <handler>]
   [--url <url>] [--from-starter] [--collections-json <JSON>] [--actions-file <path>]
 publish <name> <file-or-folder>
 post <name> <collection> <key> (--json <JSON> | --file <path-or-> | --delete)
@@ -28,12 +28,18 @@ url <name>
 remove <name> [--force]
 restore <name>
 update-manifest <name> [--json <JSON> | --file <path-or->] [--title <title>]
-  [--owner <environment>/<thread>] [--handler <environment>/<thread>] [--url <url>]
+  [--owner <environment>/<thread>] [--handler <handler>] [--url <url>]
   [--kind page|url] [--collections-json <JSON>] [--stale-after-minutes <number>]
   [--pinned | --unpinned] [--actions-file <path>]
 
+action claim <name> <requestId> [--handler <pull-name>]
+action ack <name> <requestId> --result-json <JSON> [--handler <pull-name>]
+action next <name> --handler <pull-name> [--wait]
+action show <name> [<requestId>]
+action repair <name>
+
 Names are local IDs or configured machine/ID pairs. JSON files may use - for stdin.
-Actions are unavailable in phase 1a.`;
+A handler is <environment>/<thread>, or pull:<name> for a handler that asks with action next.`;
 
 interface ClientOptions {
   env?: NodeJS.ProcessEnv;
@@ -41,6 +47,7 @@ interface ClientOptions {
   retryTimeoutMs?: number;
   retryDelayMs?: number;
   sshExecutable?: string;
+  pollMs?: number;
 }
 interface Parsed {
   command: string;
@@ -84,6 +91,7 @@ const VALUE_FLAGS = new Set([
   "before",
   "kind",
   "stale-after-minutes",
+  "result-json",
 ]);
 const FLAGS: Record<string, string[]> = {
   create: [
@@ -198,6 +206,12 @@ function identity(config: HubConfig, parsed: Parsed, env: NodeJS.ProcessEnv): st
 
 function threadRef(value: string): JsonObject {
   if (value.startsWith("{")) return object(json(value), "Thread reference");
+  if (value.startsWith("pull:")) {
+    const name = value.slice(5);
+    if (!SLUG.test(name))
+      throw new Error("A pull handler name uses lowercase letters, digits and hyphens");
+    return { kind: "pull", name };
+  }
   const [environmentId, threadId] = writer(value).split("/");
   return { environmentId, threadId };
 }
@@ -684,11 +698,70 @@ function revision(result: unknown): string {
   return String(rev);
 }
 
+const ACTION_COMMANDS: Record<string, { args: number[]; flags: string[] }> = {
+  claim: { args: [2], flags: ["handler"] },
+  ack: { args: [2], flags: ["handler", "result-json"] },
+  next: { args: [1], flags: ["handler", "wait"] },
+  show: { args: [1, 2], flags: [] },
+  repair: { args: [1], flags: [] },
+};
+
+async function actionCommand(ctx: Context): Promise<string> {
+  const { parsed, config, options } = ctx;
+  const [operation, name, requestId] = parsed.args as [string, string, string | undefined];
+  const { id, remote } = target(config, name);
+  const handler = stringFlag(parsed, "handler");
+  if (handler !== undefined && !SLUG.test(handler))
+    throw new Error("Name a pull handler with lowercase letters, digits and hyphens");
+  if (operation === "next" && handler === undefined) throw new Error("Next requires --handler");
+  const resultJson = stringFlag(parsed, "result-json");
+  if (operation === "ack" && resultJson === undefined)
+    throw new Error("Ack requires --result-json");
+  if (remote) {
+    const args = ["action", operation, id, ...(requestId === undefined ? [] : [requestId])];
+    if (handler !== undefined) args.push("--handler", handler);
+    if (resultJson !== undefined) args.push("--result-json", resultJson);
+    if (parsed.flags.has("wait")) args.push("--wait");
+    return await remoteCommand(ctx, remote, args, Buffer.alloc(0));
+  }
+  const route = `/api/write/${encodeURIComponent(id)}/action/${operation}`;
+  const body: JsonObject = {};
+  if (requestId !== undefined) body.requestId = requestId;
+  if (handler !== undefined) body.handler = handler;
+  if (operation === "ack") Object.assign(body, object(json(resultJson!), "Result"));
+  if (operation === "next") {
+    /* eslint-disable no-await-in-loop -- A waiting pull handler asks again until work arrives. */
+    for (;;) {
+      const result = object(await hubRequest(ctx, route, body), "Hub response");
+      if (result.request) return JSON.stringify(result.request);
+      if (!parsed.flags.has("wait")) return "No request";
+      await delay(options.pollMs ?? 2000);
+    }
+    /* eslint-enable no-await-in-loop */
+  }
+  const result = object(await hubRequest(ctx, route, body), "Hub response");
+  if (operation === "ack") return String(result.state);
+  if (operation === "repair")
+    return `kept ${String(result.kept)}, set aside ${String(result.setAside)}`;
+  return JSON.stringify(
+    operation === "show" && requestId !== undefined ? (result.requests as unknown[])[0] : result,
+  );
+}
+
 export async function runDash(argv: string[], options: ClientOptions = {}): Promise<string> {
   const parsed = parse(argv);
   if (parsed.flags.has("help")) return HELP;
-  if (parsed.command === "action") throw new Error("Dashboard actions are unavailable in phase 1a");
-  const allowed = FLAGS[parsed.command];
+  if (parsed.command === "action") {
+    const spec = ACTION_COMMANDS[parsed.args[0] ?? ""];
+    if (!spec) throw new Error("Unknown action command; run dash --help");
+    for (const flag of parsed.flags.keys())
+      if (!["config", "as", ...spec.flags].includes(flag))
+        throw new Error(`Option --${flag} is not valid for action ${parsed.args[0]}`);
+    if (!spec.args.includes(parsed.args.length - 1))
+      throw new Error(`Invalid arguments for action ${parsed.args[0]}; run dash --help`);
+  }
+  const allowed =
+    parsed.command === "action" ? ACTION_COMMANDS[parsed.args[0]!]!.flags : FLAGS[parsed.command];
   if (!allowed) throw new Error("Unknown command; run dash --help");
   for (const flag of parsed.flags.keys())
     if (!["config", "as", ...allowed].includes(flag))
@@ -706,7 +779,7 @@ export async function runDash(argv: string[], options: ClientOptions = {}): Prom
     restore: 1,
     "update-manifest": 1,
   };
-  if (parsed.args.length !== counts[parsed.command])
+  if (parsed.command !== "action" && parsed.args.length !== counts[parsed.command])
     throw new Error(`Invalid arguments for ${parsed.command}; run dash --help`);
   const env = options.env ?? process.env;
   const configPath = stringFlag(parsed, "config") ?? env.DOPAMINE_CONFIG;
@@ -725,6 +798,7 @@ export async function runDash(argv: string[], options: ClientOptions = {}): Prom
     parsed,
     ...(write ? { identity: identity(config, parsed, env) } : {}),
   };
+  if (parsed.command === "action") return await actionCommand(ctx);
   if (parsed.command === "list") {
     const result = object(await hubRequest(ctx, "/api/list"), "Hub response");
     if (!Array.isArray(result.dashboards))

@@ -26,5 +26,17 @@
       allow="clipboard-write"
       hidden
     ></iframe>
+    <dialog id="confirm" aria-labelledby="confirm-title">
+      <h2 id="confirm-title">Confirm this action</h2>
+      <p class="muted">
+        Dopamine drew this box from the request it recorded. The dashboard can't see or press it.
+      </p>
+      <dl id="confirm-fields"></dl>
+      <p id="confirm-error" role="alert" hidden></p>
+      <div class="confirm-buttons">
+        <button id="confirm-cancel" type="button" autofocus>Cancel</button>
+        <button id="confirm-ok" type="button" disabled>Confirm</button>
+      </div>
+    </dialog>
   </body>
 </html>

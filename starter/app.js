@@ -3,8 +3,13 @@ const sections = new Map(),
 const root = document.querySelector("#collections");
 let saved = {},
   current,
+  manifest,
+  handlerState,
   ready = false,
   debounce;
+const requestBoxes = new Map(),
+  requestsByItem = new Map(),
+  notices = new Map();
 const display = (value) =>
   typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? "");
 const el = (tag, text, className) => {
@@ -36,6 +41,130 @@ function safeLink(href) {
   } catch {
     return null;
   }
+}
+const when = (at) =>
+  `${new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Vancouver",
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(at))} PT`;
+const STATES = {
+  "awaiting-confirmation": "Waiting for you to confirm",
+  queued: "Queued",
+  sending: "Sending…",
+  delivered: "Delivered; waiting for the handler",
+  failed: "Delivery failed; trying again",
+  stalled: "Delivery stopped after five tries",
+  ambiguous: "May have been delivered; check before retrying",
+  abandoned: "Abandoned",
+  claimed: "The handler is working on it",
+  unresolved: "Unresolved: claimed over 30 minutes ago with no result",
+  done: "Done",
+  unknown: "The handler couldn't tell whether it ran",
+};
+const CHOICES = {
+  "awaiting-confirmation": [["confirm", "Confirm…"]],
+  failed: [["abandon", "Abandon"]],
+  stalled: [
+    ["retry", "Retry"],
+    ["abandon", "Abandon"],
+  ],
+  ambiguous: [
+    ["retry", "Retry"],
+    ["abandon", "Abandon"],
+  ],
+  unknown: [
+    ["mark-done", "Mark done"],
+    ["run-again", "Run again"],
+    ["abandon", "Abandon"],
+  ],
+};
+function choose(request, choice) {
+  const run =
+    choice === "confirm"
+      ? dopamine.confirm(request.requestId)
+      : dopamine.choose(request.requestId, choice);
+  void run.catch(showError);
+}
+function requestRow(request) {
+  const row = el("div", undefined, `request ${request.state}`);
+  const answer =
+    request.payload && typeof request.payload.answer === "string"
+      ? `: ${request.payload.answer}`
+      : "";
+  let text = `${request.label}${answer} · ${STATES[request.state] ?? request.state}`;
+  if (request.state === "failed" && request.nextAttemptAt)
+    text += ` at ${when(request.nextAttemptAt)}`;
+  row.append(el("span", text));
+  if (request.result) {
+    const href = request.result.href && safeLink(request.result.href);
+    if (href) {
+      const a = el("a", request.result.label);
+      a.href = href;
+      row.append(" · ", a);
+    } else row.append(el("span", ` · ${request.result.label}`));
+  }
+  for (const [choice, label] of CHOICES[request.state] ?? []) {
+    const button = el("button", label);
+    button.type = "button";
+    button.addEventListener("click", () => choose(request, choice));
+    row.append(button);
+  }
+  if (request.error) row.append(el("small", request.error));
+  return row;
+}
+function drawRequests(stable) {
+  const box = requestBoxes.get(stable);
+  if (!box) return;
+  const rows = (requestsByItem.get(stable) ?? []).slice(-3).toReversed().map(requestRow);
+  const notice = notices.get(stable);
+  box.replaceChildren(...(notice ? [notice] : []), ...rows);
+}
+async function act(action, collection, key, payload, confirmDuplicate = false) {
+  const stable = JSON.stringify([collection, key]);
+  notices.delete(stable);
+  try {
+    await dopamine.act(action.name, { collection, key }, payload, { confirmDuplicate });
+  } catch (error) {
+    const notice = el("div", error.message, "request notice");
+    if (error.duplicateOf) {
+      const again = el("button", "Send again");
+      again.type = "button";
+      again.addEventListener("click", () => void act(action, collection, key, payload, true));
+      notice.append(again);
+    }
+    notices.set(stable, notice);
+  }
+  drawRequests(stable);
+}
+function actionControls(name, key, record) {
+  const declared = (manifest?.actions ?? []).filter(
+    (action) => action.scope === "item" && action.collections.includes(name),
+  );
+  if (!declared.length) return [];
+  const buttons = el("div", undefined, "actions");
+  const questions = manifest.collections?.[name]?.type === "questions";
+  for (const action of declared) {
+    const answers =
+      questions && Array.isArray(record.options)
+        ? record.options.map((option) => option?.label).filter((label) => typeof label === "string")
+        : [];
+    for (const answer of answers.length ? answers : [null]) {
+      const button = el("button", answer ?? action.label);
+      button.type = "button";
+      button.disabled = handlerState === "archived";
+      button.addEventListener(
+        "click",
+        () => void act(action, name, key, answer === null ? null : { answer }),
+      );
+      buttons.append(button);
+    }
+  }
+  const stable = JSON.stringify([name, key]);
+  const box = el("div", undefined, "requests");
+  box.setAttribute("aria-live", "polite");
+  requestBoxes.set(stable, box);
+  return [buttons, box];
 }
 function render(data) {
   if (data.rev === current?.rev) return;
@@ -126,13 +255,10 @@ function render(data) {
           content.append(a, document.createTextNode(" "));
         }
       }
-      const when = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "America/Vancouver",
-        dateStyle: "medium",
-        timeStyle: "short",
-      }).format(new Date(item.at));
-      content.append(el("small", `${item.by} · ${when} PT`));
+      content.append(el("small", `${item.by} · ${when(item.at)}`));
+      content.append(...actionControls(name, key, record));
       card.replaceChildren(content);
+      drawRequests(stable);
       card.dataset.rev = String(item.rev);
       section.append(card);
     }
@@ -141,6 +267,7 @@ function render(data) {
     if (!active.has(key)) {
       card.remove();
       cards.delete(key);
+      requestBoxes.delete(key);
     }
   for (const [name, section] of sections)
     if (!data.collections[name]) {
@@ -170,10 +297,23 @@ function render(data) {
     const meta = await dopamine.meta();
     document.querySelector("#title").textContent = meta.manifest.title;
     document.title = meta.manifest.title;
+    manifest = meta.manifest;
+    handlerState = meta.handlerState;
+    if (handlerState === "archived")
+      showError(new Error("This dashboard's handler thread is archived, so its buttons are off."));
   } catch (error) {
     showError(error);
   }
   dopamine.subscribe(render, showError);
+  if (manifest?.actions?.length)
+    dopamine.watchRequests((requests) => {
+      requestsByItem.clear();
+      for (const request of requests) {
+        const stable = JSON.stringify([request.target.collection, request.target.key]);
+        requestsByItem.set(stable, [...(requestsByItem.get(stable) ?? []), request]);
+      }
+      for (const stable of requestBoxes.keys()) drawRequests(stable);
+    }, showError);
   ready = true;
 })();
 addEventListener("scroll", save, { passive: true });
