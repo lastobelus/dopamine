@@ -33,7 +33,7 @@ pnpm lastcode:merge -- <PR>
 
 ## Scope
 
-Work only on phase 1a. Phase 1b (actions) and any phase 2 work, including changes to LastCode itself, need the owner's approval before you start.
+Work on phases 1a and 1b (actions). Any phase 2 work, including changes to LastCode itself, needs the owner's approval before you start.
 
 ## Commits
 

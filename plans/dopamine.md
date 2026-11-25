@@ -1,6 +1,6 @@
 # Dopamine
 
-**Status:** In Progress. Phase 1a is built and deployed; its acceptance checks are partly observed (see "Phase 1a is done when"). Phase 1b (actions) is next and waits for the owner's go-ahead. Phase 2 is a LastCode change and the owner's call. Phase 3 is decided after a week of real use.
+**Status:** In Progress. Phase 1a is built and deployed; its acceptance checks are partly observed (see "Phase 1a is done when"). Phase 1b (actions) is built and tested; its acceptance checks wait for a deployed installation (see "Phase 1b is done when"). Phase 2 is a LastCode change and the owner's call. Phase 3 is decided after a week of real use.
 
 This plan describes dopamine itself, for anyone running it with LastCode or T3 Code across more than one environment. It never names a particular installation. A specific installation keeps its own private plan: which machines, ports, service files and tunnels it uses, and which of the acceptance checks below it has observed.
 
@@ -32,15 +32,15 @@ The LastCode or T3 Code desktop app runs on one machine, the **desktop machine**
 
 ## Where each goal is met
 
-| Goal                     | Phase 1a                                                            | Phase 1b | Phase 2 (LastCode PR)                          | Phase 3 (decision)  |
-| ------------------------ | ------------------------------------------------------------------- | -------- | ---------------------------------------------- | ------------------- |
-| 1. Beside any thread     | A "Dashboards" project Action opens the hub in that thread's panel  |          | [+] → Dashboards                               | The tab follows you |
-| 2. No hunting            | Hub index                                                           |          | [+] → Dashboards                               |                     |
-| 3. One copy              | One copy per thread you open it in; repeated link clicks still copy |          | Link clicks and agent opens reuse the open tab | One copy in total   |
-| 4. Every environment     | The viewing hub lists and proxies its peer's dashboards             |          |                                                |                     |
-| 5. Standalone            | Browser or installed web app on the desktop machine                 |          |                                                |                     |
-| 6. Removal               | Remove, restore, uninstall                                          |          |                                                |                     |
-| 7. Actions, contributors | `dash` from any environment; agent-written pages                    | Actions  |                                                |                     |
+| Goal                     | Phase 1a                                                            | Phase 1b   | Phase 2 (LastCode PR)                          | Phase 3 (decision)  |
+| ------------------------ | ------------------------------------------------------------------- | ---------- | ---------------------------------------------- | ------------------- |
+| 1. Beside any thread     | A "Dashboards" project Action opens the hub in that thread's panel  |            | [+] → Dashboards                               | The tab follows you |
+| 2. No hunting            | Hub index                                                           |            | [+] → Dashboards                               |                     |
+| 3. One copy              | One copy per thread you open it in; repeated link clicks still copy |            | Link clicks and agent opens reuse the open tab | One copy in total   |
+| 4. Every environment     | The viewing hub lists and proxies its peer's dashboards             |            |                                                |                     |
+| 5. Standalone            | Browser or installed web app on the desktop machine                 |            |                                                |                     |
+| 6. Removal               | Remove, restore, uninstall                                          |            |                                                |                     |
+| 7. Actions, contributors | `dash` from any environment; agent-written pages                    | Actions ✅ |                                                |                     |
 
 ## Setting up environments for dopamine
 
@@ -119,7 +119,9 @@ Observed on an installation with a desktop machine and one peer machine, not inf
 
 **Observed so far on the reference installation (Nov 23):** 5 (posted from both machines within 139 ms, by `dash` from one thread), 6 (removed from the index, restored with its data), 9 (94 tests). The rest need a person at the desktop or a reboot. Each installation records its own observations in its private plan.
 
-## Phase 1b: actions (next; needs the owner's go-ahead)
+## Phase 1b: actions ✅ built
+
+`docs/api.md` ("Actions") is the reference for what is built. This section records the design and why; "Built differently" at its end lists where the build departs from it.
 
 ### Accepting a click
 
@@ -168,6 +170,22 @@ One queue per handler thread. Delivery uses `lastcode-thread send <threadId> - -
 
 Fake `lastcode-thread` and fake SSH: delivered; failed only after a failed reachability check, with retry timing; ambiguous then retried then the first message arriving gives one claim and one launch; a lost 202 followed by an item change and the same click resubmitted returns the original request; a failure after dispatch is ambiguous and not resent; stall after five; ambiguous on timeout; a paused sender while the handler claims and acks, then a duplicate delivery, gives one launch; crash after claim shows unresolved and is not rerun blindly; a recovered `sending` record becomes ambiguous; double-submitted clicks; stale `itemRev` and `collectionRev`; oversized payloads; `confirm` actions queue only after confirmation in the shell and cannot be confirmed by page script, including from direct mode; pull handlers through claim and ack, with two consumers, an early exit and a wrong name; a handler reassigned between claim and ack; an unconfirmed answer does not mark its question answered and a cancelled one reopens it; hostile strings render as text in the modal; cross-origin and form confirmations refused; confirmation of a peer dashboard through the peer channel; forged keys without the peer credential refused; remote `dash post` records the originating thread; forced removal during a paused send refused; forced removal after delivery makes the claim fail; truncated tails and corrupt middle lines; identical, changed, bad-origin and oversized click retries; queued actions survive a rolled-back deploy.
 
+### Built differently
+
+An earlier dashboard, outside this repository, already delivered button clicks to a thread, and its route worked in daily use. Where it and this plan disagreed, the build follows what worked, except where noted.
+
+- **The receipt.** The plan expected the send to return message and run IDs. The thread CLIs in use differ: `lastcode-thread send` returns `{kind: "accepted", environmentId, threadId, messageId}`, and another thread CLI also returns `runId`. A reply with a `messageId` is the receipt; `runId` is recorded when present.
+- **Reaching a thread.** Like the earlier dashboard, the hub runs a configured thread command, over SSH with `BatchMode=yes`, `ConnectTimeout=5` and a 30-second limit when the handler is on another machine. The configuration is `threadEnvironments`, a map from environment ID to `{threadCommand, host?}`; the adapter's own environment needs no entry.
+- **Queue order.** As in the earlier dashboard, a failed request keeps its place, and later requests to the same thread wait behind it until it is delivered, stalls or is abandoned.
+- **Evidence nothing was sent.** For a handler on this machine, the evidence is that the thread command does not exist; for another machine, the separate SSH check, as planned.
+- **Kept from the plan: ambiguous sends are not resent automatically.** The earlier dashboard resends them and relies on its handler to drop duplicates by request ID. Here the hub's claim makes a duplicate harmless too, but a reader who sees "may have been delivered" and chooses Retry knows what they asked for, so the plan's rule stands.
+- **Ack.** Only the handler that claimed a request can acknowledge it, so reassigning the dashboard's handler between claim and ack does not let the new handler close the old one's work.
+- **Run again** records a new request with the same snapshot and closes the old one as abandoned, pointing to the new one, so handling still never returns to `unclaimed`.
+- **Reader choices** (Retry, Abandon, Mark done, Run again) are posted from the dashboard page, to `/api/request`. They need no shell confirmation; a rerun of a `confirm` action waits for confirmation again.
+- **Escape** closes the shell's confirmation box and leaves the request waiting, so the page can ask again; only Cancel abandons it.
+- **"Not polling"** for a pull handler is measured from this hub's memory, so it also shows for 24 hours after the hub restarts.
+- **Repair** keeps the records that still apply and marks every open unclaimed request ambiguous, so nothing is resent automatically. It cannot recover a lost claim record.
+
 ### Phase 1b is done when
 
 1. A test action from a dashboard on each machine reaches a scratch handler thread, is claimed and acked once, and its result appears on the item.
@@ -175,6 +193,8 @@ Fake `lastcode-thread` and fake SSH: delivered; failed only after a failed reach
 3. A double-submitted click makes one request; a decision on a changed item is refused; beside a thread on each machine, a `confirm` action opens the shell's modal and runs only after Confirm.
 4. Killing the handler after its claim shows unresolved; reconciliation finds the launched thread by request ID and acks it.
 5. All tests pass.
+
+**Observed so far:** 5 (119 tests, in CI). The rest need a deployed installation and a person at the desktop.
 
 ## Phase 2: [+] → Dashboards and reusing an open tab (a LastCode PR, the owner's call)
 
