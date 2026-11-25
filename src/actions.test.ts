@@ -913,6 +913,36 @@ describe("removal and damaged logs", () => {
   });
 
   it.each([
+    { confirm: false, fields: { transport: "sending", attempts: 1, error: "Unexpected" } },
+    {
+      confirm: true,
+      fields: { transport: "queued", by: HANDLER_ID, error: "Unexpected" },
+    },
+    {
+      confirm: true,
+      fields: { transport: "queued", by: HANDLER_ID, nextAttemptAt: new Date(clock).toISOString() },
+    },
+  ])(
+    "rejects fields the $fields.transport transition cannot write ($fields)",
+    async ({ confirm, fields }) => {
+      const hub = await fixture();
+      const rev = await board(hub, [{ ...DECIDE, confirm }]);
+      const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+      const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+      const show = async () => (await write(hub, "example/action/show", { requestId })).value();
+      const before = (await show()).requests;
+      const event = { event: "transport", requestId, at: new Date(clock).toISOString(), ...fields };
+      await appendFile(log, JSON.stringify(event) + "\n");
+      expect(await show()).toEqual({ damaged: true, requests: before });
+      expect((await write(hub, "example/action/repair", {})).value()).toEqual({
+        kept: 1,
+        setAside: 1,
+      });
+      expect((await show()).damaged).toBe(false);
+    },
+  );
+
+  it.each([
     { repair: false, failures: 1, state: "failed" },
     { repair: true, failures: 4, state: "stalled" },
   ])(

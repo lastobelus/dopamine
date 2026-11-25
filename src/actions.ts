@@ -257,6 +257,15 @@ function readRequest(value: unknown): RequestEvent["request"] {
   return logged;
 }
 
+function transportFields(event: TransportEvent, ...fields: (keyof TransportEvent)[]): boolean {
+  const allowed = new Set<string>(["event", "requestId", "at", "transport", ...fields]);
+  return Object.keys(event).every((field) => allowed.has(field));
+}
+
+function isRepairTransport(event: TransportEvent): boolean {
+  return event.transport === "ambiguous" && event.by !== undefined && event.error === REPAIR_ERROR;
+}
+
 function canApplyTransport(
   request: ActionRequest,
   event: TransportEvent,
@@ -268,9 +277,10 @@ function canApplyTransport(
   switch (event.transport) {
     case "queued":
       if (!unclaimed || event.by === undefined) return false;
-      if (from === "awaiting-confirmation") return event.attempts === undefined;
+      if (from === "awaiting-confirmation") return transportFields(event, "by");
       return (
         ["failed", "stalled", "ambiguous"].includes(from) &&
+        transportFields(event, "by", "attempts", "nextAttemptAt", "error") &&
         event.attempts === 0 &&
         event.nextAttemptAt === null &&
         event.error === null
@@ -280,6 +290,7 @@ function canApplyTransport(
         unclaimed &&
         !pull &&
         ["queued", "failed"].includes(from) &&
+        transportFields(event, "attempts") &&
         event.attempts === request.attempts + 1
       );
     case "failed":
@@ -289,6 +300,7 @@ function canApplyTransport(
       return (
         !pull &&
         ["queued", "failed"].includes(from) &&
+        transportFields(event, "attempts", "nextAttemptAt", "error") &&
         attempts !== undefined &&
         (attempts === request.attempts + 1 ||
           (attemptsBeforeRetry !== undefined && attempts === attemptsBeforeRetry + 1)) &&
@@ -299,22 +311,46 @@ function canApplyTransport(
       );
     }
     case "delivered":
-      if (!pull) return from === "sending" && event.receipt !== undefined;
+      if (!pull) {
+        if (
+          from !== "sending" ||
+          event.error !== null ||
+          !transportFields(event, "receipt", "error")
+        )
+          return false;
+        const receipt = logFields(event.receipt, "messageId", "runId");
+        return (
+          typeof receipt.messageId === "string" &&
+          !!receipt.messageId &&
+          (receipt.runId === undefined || typeof receipt.runId === "string")
+        );
+      }
       return (
         unclaimed &&
         event.by === handlerIdentity(request.handler) &&
-        event.leaseUntil !== undefined &&
+        transportFields(event, "by", "leaseUntil") &&
+        logDate(event.leaseUntil) &&
         Date.parse(event.leaseUntil) > Date.parse(event.at) &&
         (from === "queued" ||
           (from === "delivered" && Date.parse(request.leaseUntil!) <= Date.parse(event.at)))
       );
     case "ambiguous":
       // Repair already writes this marker, including on logs from before validation.
-      if (event.by !== undefined && event.error === REPAIR_ERROR)
-        return unclaimed && REPAIRABLE_TRANSPORTS.has(from);
-      return from === "sending" && typeof event.error === "string";
+      if (isRepairTransport(event))
+        return (
+          unclaimed && REPAIRABLE_TRANSPORTS.has(from) && transportFields(event, "by", "error")
+        );
+      return (
+        from === "sending" && typeof event.error === "string" && transportFields(event, "error")
+      );
     case "abandoned":
-      return unclaimed && from !== "sending" && from !== "abandoned" && event.by !== undefined;
+      return (
+        unclaimed &&
+        from !== "sending" &&
+        from !== "abandoned" &&
+        event.by !== undefined &&
+        transportFields(event, "by")
+      );
     default:
       return false;
   }
@@ -387,49 +423,11 @@ function apply({ requests, clicks, attemptsBeforeRetry }: Log, raw: unknown): vo
   const request = requests.get(text(event.requestId, "Request ID"));
   if (!request || !logDate(event.at)) throw new Error("Invalid event request or time");
   if (event.event === "transport") {
-    logFields(
-      event,
-      "event",
-      "requestId",
-      "at",
-      "transport",
-      "by",
-      "attempts",
-      "nextAttemptAt",
-      "error",
-      "receipt",
-      "leaseUntil",
-    );
     if (event.by !== undefined) text(event.by, "Actor");
-    if (event.attempts !== undefined) integer(event.attempts, "Attempts");
-    if (
-      (event.nextAttemptAt != null && !logDate(event.nextAttemptAt)) ||
-      (event.error != null && typeof event.error !== "string") ||
-      (event.attempts !== undefined &&
-        !["queued", "sending", "failed", "stalled"].includes(String(event.transport))) ||
-      (event.nextAttemptAt !== undefined &&
-        !["queued", "failed", "stalled"].includes(String(event.transport))) ||
-      (event.leaseUntil !== undefined &&
-        (!logDate(event.leaseUntil) || event.transport !== "delivered" || !isPull(request.handler)))
-    )
-      throw new Error("Invalid transport fields");
-    if (event.receipt !== undefined) {
-      if (event.transport !== "delivered" || isPull(request.handler))
-        throw new Error("Unexpected delivery receipt");
-      const receipt = logFields(event.receipt, "messageId", "runId");
-      if (
-        typeof receipt.messageId !== "string" ||
-        !receipt.messageId ||
-        (receipt.runId !== undefined && typeof receipt.runId !== "string")
-      )
-        throw new Error("Invalid delivery receipt");
-    }
     const change = event as unknown as TransportEvent;
     if (!canApplyTransport(request, change, attemptsBeforeRetry.get(request.requestId)))
       throw new Error("Invalid transport transition");
-    const repairing =
-      change.transport === "ambiguous" && change.by !== undefined && change.error === REPAIR_ERROR;
-    if (change.transport === "queued" || repairing) {
+    if (change.transport === "queued" || isRepairTransport(change)) {
       // Repair and Retry can both happen while the same reachability check is still pending.
       if (request.transport === "failed")
         attemptsBeforeRetry.set(request.requestId, request.attempts);
