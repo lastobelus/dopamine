@@ -8,14 +8,26 @@ import { extname } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { DashboardStore } from "./store.ts";
-import { HttpError } from "./model.ts";
-import type { DashboardRecord, JsonValue } from "./model.ts";
+import { HttpError, isPull } from "./model.ts";
+import type { DashboardRecord, Handler, JsonValue } from "./model.ts";
 import type { HubConfig } from "./config.ts";
-import { dashboardOrigin, readSecret, shellUrl, validateConfig } from "./config.ts";
+import {
+  dashboardOrigin,
+  readSecret,
+  shellUrl,
+  threadEnvironment,
+  validateConfig,
+} from "./config.ts";
+import { ActionStore, publicRequest } from "./actions.ts";
+import type { ActionRequest } from "./actions.ts";
+import { Delivery, remoteWord } from "./delivery.ts";
+import type { DeliveryOptions } from "./delivery.ts";
 
 const execute = promisify(execFile);
 const slug = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const limit = 32 * 1024 * 1024;
+const clickLimit = 32 * 1024;
+const pollIdleMs = 24 * 60 * 60 * 1000;
 const projectIconLimit = 128 * 1024;
 const projectIconTypes = new Set([
   "image/avif",
@@ -70,7 +82,17 @@ interface Summary extends DashboardRecord {
   ownerState: string;
   project: ProjectSummary | null;
   handlerState: string;
+  pendingAnswers: { collection: string; key: string }[];
   frameAllowed: boolean;
+}
+/** A request as its handler sees it, with the snapshot it acts on. */
+function fullRequest(request: ActionRequest, now: number) {
+  return {
+    ...publicRequest(request, now),
+    dashboard: request.dashboard,
+    handler: request.handler,
+    snapshot: request.snapshot,
+  };
 }
 function sameSecret(actual: string | undefined, expected: string): boolean {
   const a = Buffer.from(actual ?? ""),
@@ -100,13 +122,13 @@ function originGuard(req: IncomingMessage, expected: string, changing: boolean):
   if (changing && req.headers["content-type"]?.split(";")[0]?.trim() !== "application/json")
     throw new HttpError(415, "Use application/json");
 }
-async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function body(req: IncomingMessage, maximum = limit): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const bytes = Buffer.from(chunk as Uint8Array);
     size += bytes.length;
-    if (size > limit) throw new HttpError(413, "Request is too large");
+    if (size > maximum) throw new HttpError(413, "Request is too large");
     chunks.push(bytes);
   }
   try {
@@ -242,35 +264,65 @@ async function readProjectIcon(command: string[], projectId: string) {
 
 async function threadState(
   config: HubConfig,
-  owner: { environmentId: string; threadId: string } | null,
+  owner: Handler | null,
+  remote?: { ssh: string },
 ): Promise<ThreadState> {
   const unknown = { state: "unknown", project: null };
-  const command = config.adapter?.threadCommand;
-  if (!owner || !command?.[0] || owner.environmentId !== config.adapter?.environmentId)
-    return unknown;
+  if (!owner || isPull(owner)) return unknown;
+  const environment = threadEnvironment(config, owner.environmentId);
+  // Index summaries read only this machine's threads; accepting a click may ask over SSH.
+  if (!environment || (environment.host && !remote)) return unknown;
+  const command = [...environment.threadCommand, "read", owner.threadId, "--json"];
   try {
-    const { stdout } = await execute(
-      command[0],
-      [...command.slice(1), "read", owner.threadId, "--json"],
-      { timeout: 1000, maxBuffer: 1024 * 1024 },
-    );
+    const { stdout } = environment.host
+      ? await execute(
+          remote!.ssh,
+          [
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            "--",
+            environment.host,
+            command.map(remoteWord).join(" "),
+          ],
+          { timeout: 10_000, maxBuffer: 1024 * 1024 },
+        )
+      : await execute(command[0]!, command.slice(1), {
+          timeout: remote ? 10_000 : 1000,
+          maxBuffer: 1024 * 1024,
+        });
     const result = JSON.parse(stdout) as {
+      kind?: unknown;
       thread?: { archived?: boolean };
       archived?: boolean;
       project?: unknown;
     };
+    // The thread CLI reports a thread it cannot find, including an archived one, as not-found.
+    if (result.kind === "not-found" || result.kind === "ambiguous")
+      return { state: "missing", project: null };
     return {
       state: (result.thread?.archived ?? result.archived) ? "archived" : "available",
       project: projectReference(result.project),
     };
-  } catch {
+  } catch (error) {
+    // SSH exits 255 when it cannot reach the host; delivery retries that with evidence.
+    const failure = error as { code?: unknown; killed?: boolean };
+    if (environment.host && (failure.code === 255 || failure.killed))
+      return { state: "unreachable", project: null };
     return unknown;
   }
 }
 
-export async function startHub(input: HubConfig): Promise<{
+export async function startHub(
+  input: HubConfig,
+  options: DeliveryOptions = {},
+): Promise<{
   config: HubConfig;
   store: DashboardStore;
+  actions: ActionStore;
+  delivery: Delivery;
   server: Server;
   port: number;
   close: () => Promise<void>;
@@ -278,6 +330,9 @@ export async function startHub(input: HubConfig): Promise<{
   const config = validateConfig({ ...input });
   const store = new DashboardStore(config.dataRoot, config.machine);
   await store.initialize();
+  const now = options.now ?? Date.now;
+  const actions = new ActionStore(store, now);
+  const delivery = new Delivery(config, actions, options);
   const token = await readSecret(config.tokenFile);
   const peerSecret = config.peerCredentialFile ? await readSecret(config.peerCredentialFile) : "";
   let commit = config.sourceCommit ?? "development";
@@ -346,7 +401,34 @@ export async function startHub(input: HubConfig): Promise<{
     const manifest = { ...record.manifest };
     const owner = manifest.owner;
     const { state: ownerState, project } = await threadState(config, owner);
-    const { state: handlerState } = await threadState(config, record.manifest.handler);
+    const handler = record.manifest.handler;
+    let { state: handlerState } = await threadState(config, handler);
+    if (handler && isPull(handler)) {
+      const last = actions.lastPoll(record.manifest.id, handler.name);
+      handlerState = last && now() - last < pollIdleMs ? "polling" : "not polling";
+    }
+    const pendingAnswers: Summary["pendingAnswers"] = [];
+    try {
+      for (const request of (await actions.list(record.manifest.id)).requests) {
+        const { collection, key: item, itemRev } = request.target;
+        const current =
+          item === undefined ? undefined : record.data.collections[collection]?.items[item];
+        // Only an answer to the question as it stands now; a changed question needs the reader again.
+        const answer = request.payload as { answer?: unknown } | null;
+        if (
+          current &&
+          current.rev === itemRev &&
+          record.manifest.collections[collection]?.type === "questions" &&
+          typeof answer?.answer === "string" &&
+          request.transport !== "awaiting-confirmation" &&
+          request.transport !== "abandoned" &&
+          request.handling !== "abandoned"
+        )
+          pendingAnswers.push({ collection, key: item! });
+      }
+    } catch {
+      /* A dashboard removed meanwhile has no answers to show. */
+    }
     let status =
       ownerState === "archived"
         ? "stale"
@@ -371,6 +453,7 @@ export async function startHub(input: HubConfig): Promise<{
         : null,
       ownerState,
       handlerState,
+      pendingAnswers,
       project: projectSummary(
         project,
         config.adapter?.projectIconCommand?.[0] && projectIconRoute + key,
@@ -464,6 +547,103 @@ export async function startHub(input: HubConfig): Promise<{
     if (!icon) throw new HttpError(404, "Project icon unavailable");
     return icon;
   }
+  async function handlerAvailable(handler: Handler): Promise<boolean> {
+    if (isPull(handler)) return true;
+    if (!threadEnvironment(config, handler.environmentId)) return false;
+    // A click is accepted only for a thread known to exist, or one whose machine is unreachable now.
+    const { state } = await threadState(config, handler, { ssh: options.ssh ?? "ssh" });
+    return state === "available" || state === "unreachable";
+  }
+  async function actionCommand(
+    id: string,
+    operation: string,
+    payload: Record<string, unknown>,
+    by: string,
+  ) {
+    const pull = payload.handler === undefined ? undefined : String(payload.handler);
+    const claimant = pull === undefined ? by : `pull:${pull}`;
+    switch (operation) {
+      case "next": {
+        if (pull === undefined || !slug.test(pull))
+          throw new HttpError(400, "Name the pull handler");
+        const request = await actions.next(id, pull);
+        return { request: request && fullRequest(request, now()) };
+      }
+      case "claim":
+        return fullRequest(await actions.claim(id, String(payload.requestId), claimant), now());
+      case "ack": {
+        const { requestId, handler: _handler, ...result } = payload;
+        return fullRequest(await actions.ack(id, String(requestId), claimant, result), now());
+      }
+      case "show": {
+        const { requests, damaged } = await actions.list(
+          id,
+          payload.requestId === undefined ? {} : { requestId: String(payload.requestId) },
+        );
+        return { requests: requests.map((request) => fullRequest(request, now())), damaged };
+      }
+      case "repair":
+        return await actions.repair(id, by);
+      default:
+        throw new HttpError(404, "Route not found");
+    }
+  }
+  /** The shell's confirmation: read the stored request, or Confirm or Cancel it. */
+  async function confirm(
+    req: IncomingMessage,
+    res: ServerResponse,
+    key: string,
+    requestId: string,
+    peerRoute: boolean,
+  ): Promise<void> {
+    if (!["GET", "POST"].includes(req.method ?? "")) throw new HttpError(405, "Method refused");
+    const parts = keyParts(key);
+    if (parts.machine !== config.machine) {
+      if (peerRoute || parts.machine !== config.peer?.machine)
+        throw new HttpError(404, "Dashboard is on another hub");
+      await peerReady();
+      const forwarded =
+        req.method === "POST" ? Buffer.from(JSON.stringify(await body(req, 1024))) : undefined;
+      const response = await call(
+        new URL(`/api/peer/confirm/${encodeURIComponent(key)}/${requestId}`, config.peer.origin),
+        req.method,
+        {
+          "x-dopamine-peer": peerSecret,
+          host: config.peer.host,
+          origin: config.viewingOrigin,
+          ...(forwarded ? { "content-type": "application/json" } : {}),
+        },
+        forwarded,
+      );
+      res.writeHead(response.status, { "content-type": "application/json; charset=utf-8" });
+      res.end(response.body);
+      return;
+    }
+    if (req.method === "POST") {
+      const { decision } = await body(req, 1024);
+      const request = await actions.decide(parts.id, requestId, decision, "reader");
+      delivery.wake();
+      return json(res, { request: publicRequest(request, now()) });
+    }
+    const record = await store.get(parts.id);
+    const request = (await actions.list(parts.id)).requests.find(
+      (candidate) => candidate.requestId === requestId && candidate.dashboard === key,
+    );
+    if (!request) throw new HttpError(404, "Action request not found");
+    const snapshot = request.snapshot as { value?: { title?: unknown } } | null;
+    const handler = request.handler;
+    return json(res, {
+      request: publicRequest(request, now()),
+      dashboard: { key, title: record.manifest.title, machine: record.manifest.machine },
+      item:
+        typeof snapshot?.value?.title === "string"
+          ? snapshot.value.title
+          : (request.target.key ?? null),
+      handler: isPull(handler)
+        ? `pull handler ${handler.name}`
+        : (handler.title ?? `thread ${handler.threadId}`),
+    });
+  }
   async function proxy(
     req: IncomingMessage,
     res: ServerResponse,
@@ -474,12 +654,25 @@ export async function startHub(input: HubConfig): Promise<{
     if (machine !== config.peer?.machine) throw new HttpError(404, "Dashboard is on another hub");
     const changing = req.method !== "GET" && req.method !== "HEAD";
     originGuard(req, dashboardOrigin(config, key), changing);
-    if (path.startsWith("/api/") && path !== "/api/view")
+    const writable: Record<string, string> = {
+      "/api/view": "PUT",
+      "/api/act": "POST",
+      "/api/request": "POST",
+    };
+    if (
+      path.startsWith("/api/") &&
+      !["/api/view", "/api/actions", ...Object.keys(writable)].includes(path)
+    )
       throw new HttpError(404, "Route not found");
-    if (!["GET", "HEAD", "PUT"].includes(req.method ?? "") || (changing && path !== "/api/view"))
+    if (
+      !["GET", "HEAD", "PUT", "POST"].includes(req.method ?? "") ||
+      (changing && writable[path] !== req.method)
+    )
       throw new HttpError(405, "Method refused");
     await peerReady();
-    const bytes = changing ? Buffer.from(JSON.stringify(await body(req))) : undefined;
+    const bytes = changing
+      ? Buffer.from(JSON.stringify(await body(req, path === "/api/view" ? limit : clickLimit)))
+      : undefined;
     const headers: Record<string, string> = {
       host: config.peer!.host,
       "x-dopamine-peer": peerSecret,
@@ -493,7 +686,14 @@ export async function startHub(input: HubConfig): Promise<{
     target.search = (req.url ?? "").includes("?")
       ? (req.url ?? "").slice((req.url ?? "").indexOf("?"))
       : "";
-    const response = await call(target, req.method, headers, bytes);
+    // Accepting a click may read the handler thread over SSH for up to ten seconds.
+    const response = await call(
+      target,
+      req.method,
+      headers,
+      bytes,
+      path === "/api/act" ? 30_000 : undefined,
+    );
     const returned: Record<string, string> = {};
     for (const header of [
       "content-type",
@@ -545,6 +745,41 @@ export async function startHub(input: HubConfig): Promise<{
         return json(res, { saved: true });
       }
       throw new HttpError(405, "Method refused");
+    }
+    if (path === "/api/act") {
+      if (req.method !== "POST") throw new HttpError(405, "Method refused");
+      const { request, existing } = await actions.accept(
+        parts.id,
+        await body(req, clickLimit),
+        handlerAvailable,
+      );
+      if (!existing) delivery.wake();
+      return json(res, { request: publicRequest(request, now()) }, existing ? 200 : 202);
+    }
+    if (path === "/api/request") {
+      if (req.method !== "POST") throw new HttpError(405, "Method refused");
+      const choice = await body(req, clickLimit);
+      const request = await actions.choose(
+        parts.id,
+        String(choice.requestId),
+        choice.choice,
+        "reader",
+      );
+      delivery.wake();
+      return json(res, { request: publicRequest(request, now()) });
+    }
+    if (path === "/api/actions") {
+      if (req.method !== "GET") throw new HttpError(405, "Method refused");
+      const filter: { collection?: string; key?: string } = {};
+      for (const name of ["collection", "key"] as const) {
+        const value = address.searchParams.get(name);
+        if (value !== null) filter[name] = value;
+      }
+      const { requests, damaged } = await actions.list(parts.id, filter);
+      return json(res, {
+        requests: requests.map((request) => publicRequest(request, now())),
+        damaged,
+      });
     }
     if (!["GET", "HEAD"].includes(req.method ?? "")) throw new HttpError(405, "Method refused");
     if (path.startsWith("/api/")) throw new HttpError(404, "Route not found");
@@ -615,6 +850,8 @@ export async function startHub(input: HubConfig): Promise<{
       if (route[0] === "create" && route.length === 1)
         return json(res, await store.create(payload), 201);
       const [id, operation] = route;
+      if (id && slug.test(id) && operation === "action" && route.length === 3)
+        return json(res, await actionCommand(id, route[2]!, payload, by));
       if (!id || !slug.test(id) || route.length !== 2) throw new HttpError(404, "Route not found");
       switch (operation) {
         case "manifest":
@@ -635,7 +872,7 @@ export async function startHub(input: HubConfig): Promise<{
         case "attach":
           return json(res, await store.attach(id, String(payload.name), payload.body as string));
         case "remove":
-          await store.remove(id, payload.force === true);
+          await store.remove(id, payload.force === true, by);
           return json(res, { removed: true });
         case "restore":
           return json(res, await store.restore(id));
@@ -669,6 +906,17 @@ export async function startHub(input: HubConfig): Promise<{
         if (response.status !== 200) throw new HttpError(response.status, "Peer refused removal");
       }
       return json(res, { removed: true });
+    }
+    const confirmation = /^\/api\/(peer\/)?confirm\/([^/]+)\/(r-[a-f0-9]{16})$/.exec(path);
+    if (confirmation) {
+      const [, peerRoute, key, requestId] = confirmation as unknown as [
+        string,
+        string,
+        string,
+        string,
+      ];
+      if (peerRoute && !peerAuthenticated) throw new HttpError(403, "Peer credential required");
+      return confirm(req, res, key, requestId, Boolean(peerRoute));
     }
     if (req.method !== "GET") throw new HttpError(405, "Method refused");
     if (path.startsWith(projectIconRoute)) {
@@ -803,6 +1051,9 @@ export async function startHub(input: HubConfig): Promise<{
               : error instanceof Error
                 ? error.message
                 : "Request failed",
+          ...(error instanceof HttpError && error.duplicateOf
+            ? { duplicateOf: error.duplicateOf }
+            : {}),
         },
         status,
       );
@@ -848,6 +1099,7 @@ export async function startHub(input: HubConfig): Promise<{
     for (const entry of listeners) entry.close();
     throw error;
   }
+  await delivery.start();
   const housekeeping = setInterval(
     () => {
       void store.initialize().catch(() => console.error("Dashboard retention cleanup failed"));
@@ -858,10 +1110,13 @@ export async function startHub(input: HubConfig): Promise<{
   return {
     config,
     store,
+    actions,
+    delivery,
     server,
     port,
     close: async () => {
       clearInterval(housekeeping);
+      await delivery.stop();
       await Promise.all(
         listeners.map(
           (entry) =>

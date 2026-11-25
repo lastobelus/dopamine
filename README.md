@@ -44,7 +44,7 @@ dash --as environment/thread post example streams worker --json '{"title":"Check
 dash url example
 ```
 
-For a custom page, put `index.html` and its assets in a folder, then run `dash publish example ./page`. Vendor libraries with the page; the page policy blocks runtime CDN requests. The supplied client, `/dopamine.js`, exposes `dopamine.data()`, `dopamine.subscribe(callback, onError)`, and `dopamine.view.get()` / `dopamine.view.set(value)`. A page may also use plain HTTP.
+For a custom page, put `index.html` and its assets in a folder, then run `dash publish example ./page`. Vendor libraries with the page; the page policy blocks runtime CDN requests. The supplied client, `/dopamine.js`, exposes `dopamine.data()`, `dopamine.subscribe(callback, onError)`, `dopamine.view.get()` / `dopamine.view.set(value)`, and for actions `dopamine.act()`, `dopamine.watchRequests()` and `dopamine.choose()`. A page may also use plain HTTP.
 
 The optional [starter](starter/) shows questions, lists, work streams, metrics and citations. It preserves disclosures and scroll across data changes and saves the reader's place on the hub. Follow the same rules in custom pages. The [dashboard skill](skills/dashboard/SKILL.md) describes when and how agents should use the tool.
 
@@ -58,4 +58,8 @@ Always share the shell address from `dash url`, including its `http://` scheme. 
 
 Deployment is local to the machine running the command. Multi-machine deployment and tunnel wiring belong in a private driver and configuration. No deployed data or credentials belong in Git.
 
-Dashboard action delivery and LastCode's panel conveniences are later phases. This version accepts action declarations as metadata but does not execute them.
+## Actions
+
+A dashboard can declare buttons that send work to a thread. A click is recorded on the dashboard's hub, delivered to the handler thread with its thread CLI (locally or over SSH), and handled at most once: the handler claims the request before acting and acknowledges it after. Consequential actions wait for the reader to confirm in a box the shell draws, which the page can't reach. Harnesses with no inbox ask for work with `dash action next`. [Configuration and API](docs/api.md#actions) describes the rules.
+
+LastCode's panel conveniences are a later phase.

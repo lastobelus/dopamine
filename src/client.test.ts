@@ -142,14 +142,17 @@ function tarEntry(name: string, type: string, body = Buffer.from("page")): Buffe
 }
 
 describe("dash client", () => {
-  it("runs help without config and rejects phase 1b commands", async () => {
-    expect(await runDash(["--help"], { env: {} })).toContain("--collections-json");
+  it("runs help without config and checks action command arguments first", async () => {
+    expect(await runDash(["--help"], { env: {} })).toContain("action claim");
     await expect(runDash(["action", "next", "--wait"], { env: {} })).rejects.toThrow(
-      "unavailable in phase 1a",
+      "Invalid arguments for action next",
     );
-    await expect(runDash(["action", "next"], { env: {} })).rejects.toThrow(
-      "unavailable in phase 1a",
+    await expect(runDash(["action", "launch", "example"], { env: {} })).rejects.toThrow(
+      "Unknown action command",
     );
+    await expect(
+      runDash(["action", "claim", "example", "r-0", "--wait"], { env: {} }),
+    ).rejects.toThrow("not valid for action claim");
     const { stdout, stderr } = await execute(process.execPath, [bin, "--help"], {
       env: { ...process.env, DOPAMINE_CONFIG: "" },
     });
@@ -488,6 +491,42 @@ describe("dash client", () => {
       name: "file ' name.txt",
       body: Buffer.from("asset").toString("base64"),
     });
+  });
+
+  it("routes action commands to the dashboard's machine with the caller's identity", async () => {
+    const f = await fixture();
+    const ssh = await fakeSsh(f);
+    const opts = { sshExecutable: ssh.script };
+    await runDash([...f.args, "action", "claim", "worker/board", "r-0123456789abcdef"], opts);
+    expect(f.calls.at(-1)!.path).toBe("/api/write/board/action/claim");
+    expect(f.calls.at(-1)!.body).toEqual({ requestId: "r-0123456789abcdef" });
+    expect(f.calls.at(-1)!.headers["x-dopamine-writer"]).toBe("environment/thread");
+    const result = '{"status":"done","result":{"label":"Merged \'$(false)"}}';
+    await runDash(
+      [
+        ...f.args,
+        "action",
+        "ack",
+        "worker/board",
+        "r-0123456789abcdef",
+        "--handler",
+        "poller",
+        "--result-json",
+        result,
+      ],
+      opts,
+    );
+    expect(f.calls.at(-1)!.body).toEqual({
+      requestId: "r-0123456789abcdef",
+      handler: "poller",
+      ...(JSON.parse(result) as object),
+    });
+    await expect(
+      runDash([...f.args, "action", "next", "board", "--handler", "Bad Name"], opts),
+    ).rejects.toThrow("pull handler");
+    await expect(runDash([...f.args, "action", "next", "board"], opts)).rejects.toThrow(
+      "Next requires --handler",
+    );
   });
 
   it.each([

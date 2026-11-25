@@ -31,7 +31,20 @@ class Element {
     if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this);
     this.parent = undefined;
   }
-  addEventListener() {}
+  listeners: Record<string, () => void> = {};
+  addEventListener(name: string, callback: () => void) {
+    this.listeners[name] = callback;
+  }
+  setAttribute() {}
+  prepend(...nodes: (Element | string)[]) {
+    const existing = this.children;
+    this.children = [];
+    this.append(...(nodes as Element[]));
+    this.children.push(...existing);
+  }
+  after(node: Element) {
+    this.parent?.append(node);
+  }
   all(): Element[] {
     return [this, ...this.children.flatMap((child) => child.all())];
   }
@@ -39,10 +52,15 @@ class Element {
     return this.textContent + this.children.map((child) => child.text()).join(" ");
   }
 }
-async function page() {
+async function page(
+  dopamine: Record<string, unknown> = {},
+  meta: unknown = { manifest: { title: "Example" } },
+  timers: (() => void)[] = [],
+) {
   const nodes = Object.fromEntries(
     ["collections", "title", "updated", "error", "empty"].map((id) => [id, new Element("div")]),
   );
+  new Element("main").append(nodes.collections!);
   let render: ((data: unknown) => void) | undefined;
   runInNewContext(await readFile(new URL("../starter/app.js", import.meta.url), "utf8"), {
     document: {
@@ -59,20 +77,28 @@ async function page() {
     location: { href: "http://example--workstation.hub.localhost/" },
     URL,
     Intl,
-    setTimeout() {},
+    setTimeout: (callback: () => void) => timers.push(callback),
     clearTimeout() {},
     dopamine: {
       view: { get: async () => ({}), set: async () => ({}) },
-      meta: async () => ({ manifest: { title: "Example" } }),
+      meta: async () => meta,
       subscribe: (callback: (data: unknown) => void) => {
         render = callback;
       },
+      ...dopamine,
     },
   });
   await setImmediate();
   if (!render) throw new Error("Starter did not subscribe");
   return { render, root: nodes.collections! };
 }
+const request = (requestId: string, state: string) => ({
+  requestId,
+  label: "Decide",
+  payload: null,
+  state,
+  target: { collection: "needs", key: "q1" },
+});
 const item = (rev: number, value: unknown) => ({
   rev,
   by: "environment/thread",
@@ -147,5 +173,134 @@ describe("starter rendering", () => {
     expect(root.text()).toContain("Retained");
     expect(root.text()).toContain("Visible context");
     expect(root.all().filter((node) => node.tag === "article")).toHaveLength(3);
+  });
+  it("offers each answer as a button and shows each request's state with the reader's choices", async () => {
+    const acted: unknown[][] = [];
+    const chosen: unknown[][] = [];
+    let showRequests: ((requests: unknown[]) => void) | undefined;
+    const { render, root } = await page(
+      {
+        act: async (...args: unknown[]) => {
+          acted.push(args);
+        },
+        choose: async (...args: unknown[]) => {
+          chosen.push(args);
+        },
+        watchRequests: (callback: (requests: unknown[]) => void) => {
+          showRequests = callback;
+        },
+      },
+      {
+        manifest: {
+          title: "Example",
+          collections: { needs: { type: "questions" } },
+          actions: [{ name: "decide", label: "Decide", collections: ["needs"], scope: "item" }],
+        },
+        handlerState: "available",
+      },
+    );
+    render({
+      rev: 4,
+      collections: {
+        needs: {
+          rev: 4,
+          order: ["q1"],
+          items: {
+            q1: item(4, { title: "Ship?", options: [{ label: "Yes" }, { label: "<b>No</b>" }] }),
+          },
+        },
+      },
+    });
+    const buttons = root
+      .all()
+      .filter((node) => node.tag === "button" && node.textContent !== "Cite");
+    expect(buttons.map((node) => node.textContent)).toEqual(["Yes", "<b>No</b>"]);
+    buttons[1]!.listeners.click!();
+    await setImmediate();
+    expect(acted).toEqual([
+      [
+        "decide",
+        { collection: "needs", key: "q1", itemRev: 4 },
+        { answer: "<b>No</b>" },
+        { confirmDuplicate: false },
+      ],
+    ]);
+    showRequests!([
+      {
+        requestId: "r-1",
+        label: "Decide",
+        payload: { answer: "<b>No</b>" },
+        state: "ambiguous",
+        target: { collection: "needs", key: "q1" },
+        error: "The send timed out",
+      },
+    ]);
+    const text = root.text();
+    expect(text).toContain("Decide: <b>No</b> · May have been delivered");
+    expect(text).toContain("The send timed out");
+    const retry = root.all().find((node) => node.textContent === "Retry")!;
+    retry.listeners.click!();
+    expect(chosen).toEqual([["r-1", "retry"]]);
+    showRequests!([
+      {
+        requestId: "r-1",
+        label: "Decide",
+        payload: { answer: "Yes" },
+        state: "done",
+        target: { collection: "needs", key: "q1" },
+        result: { label: "Shipped", href: "javascript:alert(1)" },
+      },
+    ]);
+    expect(root.text()).toContain("Shipped");
+    // An older request that needs the reader stays visible behind newer finished ones.
+    showRequests!([
+      request("r-0", "ambiguous"),
+      request("r-1", "done"),
+      request("r-2", "done"),
+      request("r-3", "done"),
+      request("r-4", "done"),
+    ]);
+    expect(root.all().filter((node) => node.className.startsWith("request "))).toHaveLength(4);
+    expect(root.text()).toContain("May have been delivered");
+    // Once the item is deleted, its request that needs the reader is still reachable.
+    render({ rev: 5, collections: { needs: { rev: 5, order: [], items: {} } } });
+    const other = root.parent!.children.find((node) => node.text().includes("Other requests"))!;
+    expect(other.hidden).toBe(false);
+    expect(other.text()).toContain("May have been delivered");
+    expect(root.all().some((node) => node.tag === "a" && node.textContent === "Shipped")).toBe(
+      false,
+    );
+  });
+  it("adds action buttons once metadata loads after a failure", async () => {
+    const timers: (() => void)[] = [];
+    let fail = true;
+    const { render, root } = await page(
+      {
+        meta: async () => {
+          if (fail) throw new Error("Dashboard request failed (503).");
+          return {
+            manifest: {
+              title: "Example",
+              collections: {},
+              actions: [{ name: "go", label: "Go", collections: ["rows"], scope: "item" }],
+            },
+          };
+        },
+        watchRequests() {},
+      },
+      undefined,
+      timers,
+    );
+    render({
+      rev: 1,
+      collections: { rows: { rev: 1, order: ["a"], items: { a: item(1, { title: "Row" }) } } },
+    });
+    const buttons = () =>
+      root.all().filter((node) => node.tag === "button" && node.textContent === "Go");
+    expect(buttons()).toHaveLength(0);
+    fail = false;
+    timers.shift()!();
+    await setImmediate();
+    expect(buttons()).toHaveLength(1);
   });
 });
