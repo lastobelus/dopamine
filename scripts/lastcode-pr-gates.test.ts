@@ -197,6 +197,17 @@ describe("completed current-head review", () => {
     completed.body +=
       '\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-01-03T00:00:00Z">done</relative-time> |';
     expect(evaluateReview(head, [completed, trigger], [], [], 0).status).toBe("ready");
+    const sameSecond = {
+      ...completed,
+      updated_at: "2026-01-03T00:00:00Z",
+      body: completed.body.replace(
+        'datetime="2026-01-03T00:00:00Z"',
+        'datetime="2026-01-03T00:00:00.087468Z"',
+      ),
+    };
+    expect(evaluateReview(head, [sameSecond, trigger], [], [], 0).status).toBe("ready");
+    const afterUpdate = { ...sameSecond, updated_at: "2026-01-02T23:59:59Z" };
+    expect(evaluateReview(head, [afterUpdate, trigger], [], [], 0).status).toBe("pending");
     const unchangedLifecycle = {
       ...completed,
       body: completed.body.replace(
