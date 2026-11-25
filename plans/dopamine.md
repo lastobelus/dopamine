@@ -164,7 +164,8 @@ One queue per handler thread. Delivery uses `lastcode-thread send <threadId> - -
 - `dash remove` refuses while any request is open. `--force` abandons requests that are unclaimed and not `sending`, and still refuses while any request is `sending` or `claimed`.
 - `dash action show`, `claim` and `ack` also find requests in removed dashboards. A removed folder is purged only when its log has no open request.
 - An archived or deleted handler thread shows "handler unavailable"; `dash update-manifest --handler` reassigns it for later requests.
-- At start, and before any append, the hub checks that the log ends with a complete record; an incomplete tail is set aside and truncated. Any other unreadable line marks the dashboard "action log damaged" until `dash action repair` runs.
+- At startup, recovery reads through the last newline. Before an append, the hub saves any bytes after that newline to an `actions.tail-*` file and truncates the log there. Any unreadable complete record marks the dashboard "action log damaged" until `dash action repair` runs.
+- Repair saves an incomplete tail the same way and sets aside any complete records it cannot keep. It reports both counts and preserves the side files beside the log. When it sets records aside, it marks unclaimed queued, sending, failed and delivered requests ambiguous before resuming writes. Repair leaves a clean log untouched.
 
 ### Tests
 
