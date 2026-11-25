@@ -831,6 +831,220 @@ describe("removal and damaged logs", () => {
     expect(await states(hub)).toEqual([expect.objectContaining({ requestId, state: "queued" })]);
   });
 
+  it.each([
+    ["missing payload", { payload: undefined }],
+    ["wrong confirmation state", { confirm: true }],
+    ["bad target revision", { target: { collection: "needs", key: "one", itemRev: "1" } }],
+    ["bad snapshot", { snapshot: { rev: 1 } }],
+    ["bad handler", { handler: { kind: "pull", name: 1 } }],
+    ["injected reduced state", { result: { label: "Never handled" } }],
+    ["a click ID that disagrees with the fingerprint", { clickId: "changed-click-id" }],
+  ])("sets aside a request record with %s", async (_name, patch) => {
+    const hub = await fixture();
+    const rev = await board(hub);
+    const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+    await page(hub, "/api/act", click(rev));
+    const { request } = JSON.parse(await readFile(log, "utf8"));
+    await writeFile(
+      log,
+      JSON.stringify({ event: "request", request: { ...request, ...patch } }) + "\n",
+    );
+    const shown = await write(hub, "example/action/show", {});
+    expect(shown.value()).toEqual({ requests: [], damaged: true });
+    expect((await page(hub, "/api/act", click(rev))).status).toBe(503);
+    expect((await write(hub, "example/action/repair", {})).value()).toEqual({
+      kept: 0,
+      setAside: 1,
+    });
+    expect((await write(hub, "example/action/show", {})).value()).toEqual({
+      requests: [],
+      damaged: false,
+    });
+  });
+
+  it.each(["identical", "different"])(
+    "rejects duplicate click IDs with %s contents",
+    async (kind) => {
+      const hub = await fixture();
+      const rev = await board(hub);
+      const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+      const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+      const { request } = JSON.parse(await readFile(log, "utf8"));
+      const duplicate = {
+        ...request,
+        requestId: "r-duplicate",
+        ...(kind === "different"
+          ? {
+              click: JSON.stringify({ ...JSON.parse(request.click), payload: null }),
+              payload: null,
+            }
+          : {}),
+      };
+      await appendFile(log, JSON.stringify({ event: "request", request: duplicate }) + "\n");
+      const show = () => write(hub, "example/action/show", {});
+      expect((await show()).value()).toMatchObject({ damaged: true, requests: [{ requestId }] });
+      expect((await write(hub, "example/action/repair", {})).value()).toEqual({
+        kept: 1,
+        setAside: 1,
+      });
+      expect((await show()).value()).toMatchObject({
+        damaged: false,
+        requests: [{ requestId, state: "ambiguous" }],
+      });
+    },
+  );
+
+  it.each([
+    { transport: "sending", attempts: 2 },
+    { transport: "failed", attempts: 5, nextAttemptAt: "2026-11-21T20:00:00.000Z", error: "SSH" },
+    { transport: "stalled", attempts: 1, nextAttemptAt: null, error: "SSH" },
+  ])("rejects impossible attempt counts for $transport", async (fields) => {
+    const hub = await fixture();
+    const rev = await board(hub);
+    const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+    const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+    const event = { event: "transport", requestId, at: new Date(clock).toISOString(), ...fields };
+    await appendFile(log, JSON.stringify(event) + "\n");
+    const shown = await write(hub, "example/action/show", { requestId });
+    expect(shown.value()).toMatchObject({
+      damaged: true,
+      requests: [{ requestId, state: "queued", attempts: 0, mayBeDelivered: false }],
+    });
+  });
+
+  it.each([
+    { confirm: false, fields: { transport: "sending", attempts: 1, error: "Unexpected" } },
+    {
+      confirm: true,
+      fields: { transport: "queued", by: HANDLER_ID, error: "Unexpected" },
+    },
+    {
+      confirm: true,
+      fields: { transport: "queued", by: HANDLER_ID, nextAttemptAt: new Date(clock).toISOString() },
+    },
+  ])(
+    "rejects fields the $fields.transport transition cannot write ($fields)",
+    async ({ confirm, fields }) => {
+      const hub = await fixture();
+      const rev = await board(hub, [{ ...DECIDE, confirm }]);
+      const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+      const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+      const show = async () => (await write(hub, "example/action/show", { requestId })).value();
+      const before = (await show()).requests;
+      const event = { event: "transport", requestId, at: new Date(clock).toISOString(), ...fields };
+      await appendFile(log, JSON.stringify(event) + "\n");
+      expect(await show()).toEqual({ damaged: true, requests: before });
+      expect((await write(hub, "example/action/repair", {})).value()).toEqual({
+        kept: 1,
+        setAside: 1,
+      });
+      expect((await show()).damaged).toBe(false);
+    },
+  );
+
+  it("keeps a late reachability result counted before Retry", async () => {
+    const hub = await fixture((threadCommand) => ({
+      threadEnvironments: { remote: { host: "worker-host", threadCommand } },
+    }));
+    const rev = await board(hub, [DECIDE], { environmentId: "remote", threadId: "far" });
+    await hub.fake.sshUp(false);
+    const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+    await hub.delivery.runOnce();
+    const due = (await states(hub))[0]!;
+    expect(due).toMatchObject({ state: "failed", attempts: 1 });
+    clock = Date.parse(due.nextAttemptAt!);
+    expect((await page(hub, "/api/request", { requestId, choice: "retry" })).status).toBe(200);
+    const recorded = {
+      event: "transport",
+      requestId,
+      transport: "failed",
+      attempts: due.attempts + 1,
+      at: new Date(clock).toISOString(),
+      nextAttemptAt: new Date(clock + 300_000).toISOString(),
+      error: "Cannot reach worker-host over SSH",
+    };
+    const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+    await appendFile(log, JSON.stringify(recorded) + "\n");
+    const shown = await write(hub, "example/action/show", { requestId });
+    expect(shown.value()).toMatchObject({
+      damaged: false,
+      requests: [{ state: "failed", attempts: 2, mayBeDelivered: false }],
+    });
+  });
+
+  it("skips invalid transitions and fields before repair, including their dependent records", async () => {
+    const hub = await fixture();
+    const rev = await board(hub);
+    const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+    const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+    const common = { requestId, at: new Date(clock).toISOString() };
+    const rejected = [
+      { ...common, event: "handling", handling: "claimed", by: HANDLER_ID },
+      { ...common, event: "handling", handling: "done", by: HANDLER_ID },
+      { ...common, event: "transport", transport: "delivered", receipt: { messageId: "skipped" } },
+      { ...common, event: "transport", transport: "sending", attempts: "1" },
+      { ...common, event: "transport", transport: "ambiguous", error: "Dependent on sending" },
+    ]
+      .map((record) => JSON.stringify(record) + "\n")
+      .join("");
+    await appendFile(log, rejected);
+    const show = () => write(hub, "example/action/show", { requestId });
+    expect((await show()).value()).toMatchObject({
+      damaged: true,
+      requests: [{ state: "queued", handling: "unclaimed", attempts: 0, mayBeDelivered: false }],
+    });
+    expect((await write(hub, "example/action/claim", { requestId })).status).toBe(503);
+    await hub.delivery.runOnce();
+    expect(await hub.fake.calls()).toHaveLength(0);
+    expect((await write(hub, "example/action/repair", {})).value()).toEqual({
+      kept: 1,
+      setAside: 5,
+    });
+    const side = (await readdir(join(hub.config.dataRoot, "example"))).find((name) =>
+      name.startsWith("actions.damaged-"),
+    );
+    expect(await readFile(join(hub.config.dataRoot, "example", side!), "utf8")).toBe(rejected);
+    expect((await show()).value()).toMatchObject({
+      damaged: false,
+      requests: [{ state: "ambiguous", handling: "unclaimed", attempts: 0, mayBeDelivered: false }],
+    });
+    await hub.delivery.runOnce();
+    expect(await hub.fake.calls()).toHaveLength(0);
+  });
+
+  it("keeps a valid claim and acknowledgement when damaged records surround them", async () => {
+    const hub = await fixture();
+    const rev = await board(hub);
+    const log = join(hub.config.dataRoot, "example", "actions.jsonl");
+    const { requestId } = (await page(hub, "/api/act", click(rev))).value().request;
+    await hub.delivery.runOnce();
+    expect((await write(hub, "example/action/claim", { requestId })).status).toBe(200);
+    const ack = await write(hub, "example/action/ack", {
+      requestId,
+      status: "done",
+      result: { label: "Handled" },
+    });
+    expect(ack.status).toBe(200);
+
+    const at = new Date(clock).toISOString();
+    const invalid = [
+      { event: "handling", requestId, at, handling: "done", by: "other/handler" },
+      { event: "handling", requestId, at, handling: "done", by: HANDLER_ID, result: { label: 1 } },
+    ].map((record) => JSON.stringify(record));
+    const lines = (await readFile(log, "utf8")).trimEnd().split("\n");
+    const ackLine = lines.pop()!;
+    const duplicateClaim = lines.at(-1)!;
+    await writeFile(log, [...lines, ...invalid, ackLine, duplicateClaim, ""].join("\n"));
+    const show = () => write(hub, "example/action/show", { requestId });
+    expect((await show()).value()).toEqual({ requests: [ack.value()], damaged: true });
+    expect((await write(hub, "example/action/repair", {})).value()).toEqual({
+      kept: 5,
+      setAside: 3,
+    });
+    expect((await show()).value()).toEqual({ requests: [ack.value()], damaged: false });
+    expect((await write(hub, "example/action/claim", { requestId })).status).toBe(409);
+  });
+
   it("refuses removal with open requests, and a forced removal makes a late claim fail", async () => {
     const hub = await fixture();
     const rev = await board(hub);

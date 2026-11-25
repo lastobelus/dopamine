@@ -171,7 +171,7 @@ function reference(value: unknown, label: string): ThreadReference | null {
   return result;
 }
 
-function handlerReference(value: unknown): Handler | null {
+export function handlerReference(value: unknown): Handler | null {
   if (value === null) return null;
   const input = object(value, "Handler");
   if (input.kind === undefined || input.kind === "thread") {
