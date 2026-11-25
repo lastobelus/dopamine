@@ -1,6 +1,6 @@
 # Dopamine
 
-**Status:** In Progress. Phase 1a is built and deployed; its acceptance checks are partly observed (see "Phase 1a is done when"). Phase 1b (actions) is built and tested; its acceptance checks wait for a deployed installation (see "Phase 1b is done when"). Phase 2 is a LastCode change and the owner's call. Phase 3 is decided after a week of real use.
+**Status:** In Progress. Phase 1a is built and deployed; its acceptance checks are partly observed (see "Phase 1a is done when"). Phase 1b (actions) is built and tested; its acceptance checks wait for a deployed installation (see "Phase 1b is done when"). Phase 2 (a LastCode change) is built; an installation gets it with its next LastCode build. Phase 3 is decided after a week of real use.
 
 This plan describes dopamine itself, for anyone running it with LastCode or T3 Code across more than one environment. It never names a particular installation. A specific installation keeps its own private plan: which machines, ports, service files and tunnels it uses, and which of the acceptance checks below it has observed.
 
@@ -32,15 +32,15 @@ The LastCode or T3 Code desktop app runs on one machine, the **desktop machine**
 
 ## Where each goal is met
 
-| Goal                     | Phase 1a                                                            | Phase 1b   | Phase 2 (LastCode PR)                          | Phase 3 (decision)  |
-| ------------------------ | ------------------------------------------------------------------- | ---------- | ---------------------------------------------- | ------------------- |
-| 1. Beside any thread     | A "Dashboards" project Action opens the hub in that thread's panel  |            | [+] → Dashboards                               | The tab follows you |
-| 2. No hunting            | Hub index                                                           |            | [+] → Dashboards                               |                     |
-| 3. One copy              | One copy per thread you open it in; repeated link clicks still copy |            | Link clicks and agent opens reuse the open tab | One copy in total   |
-| 4. Every environment     | The viewing hub lists and proxies its peer's dashboards             |            |                                                |                     |
-| 5. Standalone            | Browser or installed web app on the desktop machine                 |            |                                                |                     |
-| 6. Removal               | Remove, restore, uninstall                                          |            |                                                |                     |
-| 7. Actions, contributors | `dash` from any environment; agent-written pages                    | Actions ✅ |                                                |                     |
+| Goal                     | Phase 1a                                                            | Phase 1b   | Phase 2 (LastCode PR)          | Phase 3 (decision)  |
+| ------------------------ | ------------------------------------------------------------------- | ---------- | ------------------------------ | ------------------- |
+| 1. Beside any thread     | A "Dashboards" project Action opens the hub in that thread's panel  |            | [+] → Dashboards               | The tab follows you |
+| 2. No hunting            | Hub index                                                           |            | [+] → Dashboards               |                     |
+| 3. One copy              | One copy per thread you open it in; repeated link clicks still copy |            | Link clicks reuse the open tab | One copy in total   |
+| 4. Every environment     | The viewing hub lists and proxies its peer's dashboards             |            |                                |                     |
+| 5. Standalone            | Browser or installed web app on the desktop machine                 |            |                                |                     |
+| 6. Removal               | Remove, restore, uninstall                                          |            |                                |                     |
+| 7. Actions, contributors | `dash` from any environment; agent-written pages                    | Actions ✅ |                                |                     |
 
 ## Setting up environments for dopamine
 
@@ -197,7 +197,7 @@ An earlier dashboard, outside this repository, already delivered button clicks t
 
 **Observed so far:** 5 (119 tests, in CI). The rest need a deployed installation and a person at the desktop.
 
-## Phase 2: [+] → Dashboards and reusing an open tab (a LastCode PR, the owner's call)
+## Phase 2: [+] → Dashboards and reusing an open tab (a LastCode PR) ✅ built
 
 Made from a thread in the LastCode project and merged only through its own merge command.
 
@@ -206,6 +206,15 @@ Made from a thread in the LastCode project and merged only through its own merge
 - **Agent opens reuse the open tab.** `preview_open({purpose: "user"})` reveals a matching tab instead of always creating one. "Always a new tab" is enforced in the server browser, the preview MCP handler, the tool description and the contract, so this half may be dropped if the skill's `preview_status` check proves enough.
 - Revealing never navigates a tab and never takes automation control of it.
 - **Acceptance:** a second click on a hub link reveals the open tab, including with a different query; [+] → Dashboards reveals a tab that moved from the index to a shell; tabs with a different profile or host, and agent-owned tabs, are not reused; Cmd-click makes a new tab.
+
+### Built differently
+
+Built in [lastCode#852](https://github.com/lastobelus/lastCode/pull/852), merged Nov 24.
+
+- **Agent opens were left unchanged.** `preview_open({purpose: "user"})` still always makes a new tab. Changing it would touch the server browser, the preview MCP handler, the contract and the tool text agents read. The dashboard skill's `preview_status` check, plus link reuse, covers the need, as this section allowed.
+- **Follow-ups:** with several hub tabs open, [+] → Dashboards should pick the one selected most recently rather than the one updated most recently; and a page's own new-window link to its own path with a different query matches its own tab, so the click does nothing (Cmd-click works around it).
+
+**Observed so far,** in an isolated LastCode dev instance against a live hub: [+] → Dashboards revealed a tab that had moved from the index to a dashboard; a terminal link with a different query revealed the open tab; a different path and a different profile opened new tabs. Unit tests cover the matching rules. Cmd-click and in-page links in the desktop app were not tried live.
 
 ## Phase 3: a tab that follows the reader (decided after a week of phase 1)
 

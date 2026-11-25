@@ -33,11 +33,11 @@ pnpm lastcode:merge -- <PR>
 
 ## Scope
 
-Work on phases 1a and 1b (actions). Any phase 2 work, including changes to LastCode itself, needs the owner's approval before you start.
+Phases 1a, 1b (actions) and 2 are built. Work on phase 1a and 1b follow-ups. Phase 3 work, and any change to LastCode itself, needs the owner's approval before you start.
 
 ## Commits
 
-Make small commits, each a single coherent change. End every commit message with the attribution trailer your harness supplies.
+Make small commits, each a single coherent change. End every commit message with the attribution trailer the owner's global instructions require. Use the trailer your harness supplies only when they name none.
 
 ## Pull requests and merging
 
