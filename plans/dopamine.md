@@ -199,11 +199,11 @@ An earlier dashboard, outside this repository, already delivered button clicks t
 
 ## Phase 2: [+] → Dashboards and reusing an open tab (a LastCode PR) ✅ built
 
-Made from a thread in the LastCode project and merged only through its own merge command.
+Made from a thread in the LastCode project and merged only through its own merge command. This section records the design; "Built differently" at its end lists where the build departs from it.
 
 - **[+] → Dashboards** reveals the most recently used reader-controlled tab on the viewing origin, without navigating it; otherwise it opens the index. The address is the `previewUrl` of the project's "Dashboards" script, so there is no new setting, and the entry appears only in projects that have the script. Touches `apps/web/src/components/RightPanelTabs.tsx` and `apps/web/src/components/chat/useRightPanelActions.ts`, with the logic in a new fork-owned file.
 - **Link clicks reuse the open tab** (`apps/web/src/browser/openFileInPreview.ts`): a tab with the exact address is revealed; for loopback and `*.localhost` addresses, a tab with the same origin and path, ignoring the query. Browser host and profile must match; agent-owned tabs never match; Cmd-click still makes a new tab.
-- **Agent opens reuse the open tab.** `preview_open({purpose: "user"})` reveals a matching tab instead of always creating one. "Always a new tab" is enforced in the server browser, the preview MCP handler, the tool description and the contract, so this half may be dropped if the skill's `preview_status` check proves enough.
+- **Agent opens reuse the open tab** (dropped; see "Built differently"). `preview_open({purpose: "user"})` reveals a matching tab instead of always creating one. "Always a new tab" is enforced in the server browser, the preview MCP handler, the tool description and the contract, so this half may be dropped if the skill's `preview_status` check proves enough.
 - Revealing never navigates a tab and never takes automation control of it.
 - **Acceptance:** a second click on a hub link reveals the open tab, including with a different query; [+] → Dashboards reveals a tab that moved from the index to a shell; tabs with a different profile or host, and agent-owned tabs, are not reused; Cmd-click makes a new tab.
 
@@ -212,7 +212,9 @@ Made from a thread in the LastCode project and merged only through its own merge
 Built in [lastCode#852](https://github.com/lastobelus/lastCode/pull/852), merged Nov 24.
 
 - **Agent opens were left unchanged.** `preview_open({purpose: "user"})` still always makes a new tab. Changing it would touch the server browser, the preview MCP handler, the contract and the tool text agents read. The dashboard skill's `preview_status` check, plus link reuse, covers the need, as this section allowed.
-- **Follow-ups:** with several hub tabs open, [+] → Dashboards should pick the one selected most recently rather than the one updated most recently; and a page's own new-window link to its own path with a different query matches its own tab, so the click does nothing (Cmd-click works around it).
+- **[+] → Dashboards picks the most recently updated hub tab,** not the most recently selected one.
+- **Only foreground opens reuse a tab:** links in chat, links a page opens in a new tab, terminal links and file previews. For loopback and `*.localhost` addresses the match ignores the query but needs the same origin, path and fragment. Cmd-click and Actions that open a page by themselves still make a new tab.
+- **Follow-ups:** with several hub tabs open, [+] → Dashboards should pick the one selected most recently; and a page's own new-window link to its own path with a different query matches its own tab, so the click does nothing (Cmd-click works around it).
 
 **Observed so far,** in an isolated LastCode dev instance against a live hub: [+] → Dashboards revealed a tab that had moved from the index to a dashboard; a terminal link with a different query revealed the open tab; a different path and a different profile opened new tabs. Unit tests cover the matching rules. Cmd-click and in-page links in the desktop app were not tried live.
 
