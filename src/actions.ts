@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, open, rename, rm } from "node:fs/promises";
 import { randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
-import { HttpError, isPull, json, object, text } from "./model.ts";
+import { HttpError, handlerReference, isPull, json, object, text } from "./model.ts";
 import type { DashboardRecord, Handler, JsonValue } from "./model.ts";
 import type { DashboardStore } from "./store.ts";
 
@@ -105,17 +105,8 @@ const LOG = "actions.jsonl";
 /** A claim with no ack after this long shows as unresolved. */
 const UNRESOLVED_MS = 30 * 60 * 1000;
 const LEASE_MS = 5 * 60 * 1000;
-const TRANSPORTS = new Set<Transport>([
-  "awaiting-confirmation",
-  "queued",
-  "sending",
-  "delivered",
-  "failed",
-  "stalled",
-  "ambiguous",
-  "abandoned",
-]);
-const HANDLINGS = new Set<Handling>(["unclaimed", "claimed", "done", "unknown", "abandoned"]);
+const REPAIR_ERROR = "Action log was repaired; check before retrying";
+const REPAIRABLE_TRANSPORTS = new Set<Transport>(["queued", "sending", "failed", "delivered"]);
 
 /** JSON with object keys sorted at every level, so equal clicks compare equal. */
 function canonical(value: unknown): string {
@@ -168,21 +159,167 @@ export function publicRequest(request: ActionRequest, now = Date.now()) {
   };
 }
 
-function apply(requests: Map<string, ActionRequest>, raw: unknown): void {
-  const event = object(raw, "Log event") as unknown as LogEvent;
-  if (event.event === "request") {
-    const request = object(event.request, "Logged request") as unknown as RequestEvent["request"];
+function logFields(value: unknown, ...allowed: string[]): Record<string, unknown> {
+  const input = object(value, "Log record");
+  if (Object.keys(input).some((key) => !allowed.includes(key)))
+    throw new Error("Unexpected log field");
+  return input;
+}
+
+function logDate(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function readRequest(value: unknown): RequestEvent["request"] {
+  const request = logFields(
+    value,
+    "requestId",
+    "clickId",
+    "click",
+    "dashboard",
+    "target",
+    "snapshot",
+    "action",
+    "label",
+    "payload",
+    "handler",
+    "confirm",
+    "at",
+    "rerunOf",
+    "transport",
+  );
+  for (const field of ["requestId", "clickId", "click", "dashboard", "action", "label"])
+    text(request[field], field);
+  if (request.rerunOf !== undefined) text(request.rerunOf, "Original request ID");
+  if (
+    typeof request.confirm !== "boolean" ||
+    request.transport !== (request.confirm ? "awaiting-confirmation" : "queued") ||
+    !logDate(request.at)
+  )
+    throw new Error("Invalid request record");
+  json(request.payload);
+  const handler = object(request.handler, "Handler");
+  if (handler.kind !== "pull") logFields(handler, "environmentId", "threadId", "title");
+  handlerReference(handler);
+
+  const target = object(request.target, "Target");
+  text(target.collection, "Target collection");
+  if (target.key !== undefined) {
+    logFields(target, "collection", "key", "itemRev");
+    text(target.key, "Target key");
+    const rev = integer(target.itemRev, "Item revision");
+    const snapshot = logFields(request.snapshot, "rev", "value");
+    if (snapshot.rev !== rev) throw new Error("Item snapshot revision does not match");
+    json(snapshot.value);
+  } else {
+    logFields(target, "collection", "collectionRev");
+    const rev = integer(target.collectionRev, "Collection revision");
+    const snapshot = logFields(request.snapshot, "rev", "order");
     if (
-      typeof request.requestId !== "string" ||
-      requests.has(request.requestId) ||
-      typeof request.clickId !== "string" ||
-      !["queued", "awaiting-confirmation"].includes(request.transport)
+      snapshot.rev !== rev ||
+      !Array.isArray(snapshot.order) ||
+      !snapshot.order.every((key) => typeof key === "string")
     )
-      throw new Error("Invalid request record");
+      throw new Error("Invalid collection snapshot");
+  }
+  return request as unknown as RequestEvent["request"];
+}
+
+function canApplyTransport(request: ActionRequest, event: TransportEvent): boolean {
+  const { transport: from, handling } = request;
+  const unclaimed = handling === "unclaimed";
+  const pull = isPull(request.handler);
+  switch (event.transport) {
+    case "queued":
+      if (!unclaimed || event.by === undefined) return false;
+      if (from === "awaiting-confirmation") return event.attempts === undefined;
+      return (
+        ["failed", "stalled", "ambiguous"].includes(from) &&
+        event.attempts === 0 &&
+        event.nextAttemptAt === null &&
+        event.error === null
+      );
+    case "sending":
+      return unclaimed && !pull && ["queued", "failed"].includes(from) && !!event.attempts;
+    case "failed":
+    case "stalled":
+      // A reachability check may finish after a late claim on a retried request.
+      return (
+        !pull &&
+        ["queued", "failed"].includes(from) &&
+        !!event.attempts &&
+        typeof event.error === "string" &&
+        (event.transport === "failed" ? logDate(event.nextAttemptAt) : event.nextAttemptAt === null)
+      );
+    case "delivered":
+      if (!pull) return from === "sending" && event.receipt !== undefined;
+      return (
+        unclaimed &&
+        event.by === handlerIdentity(request.handler) &&
+        event.leaseUntil !== undefined &&
+        Date.parse(event.leaseUntil) > Date.parse(event.at) &&
+        (from === "queued" ||
+          (from === "delivered" && Date.parse(request.leaseUntil!) <= Date.parse(event.at)))
+      );
+    case "ambiguous":
+      // Repair already writes this marker, including on logs from before validation.
+      if (event.by !== undefined && event.error === REPAIR_ERROR)
+        return unclaimed && REPAIRABLE_TRANSPORTS.has(from);
+      return from === "sending" && typeof event.error === "string";
+    case "abandoned":
+      return unclaimed && from !== "sending" && from !== "abandoned" && event.by !== undefined;
+    default:
+      return false;
+  }
+}
+
+function canApplyHandling(request: ActionRequest, event: HandlingEvent): boolean {
+  switch (event.handling) {
+    case "claimed":
+      return (
+        request.handling === "unclaimed" &&
+        request.transport !== "abandoned" &&
+        request.mayBeDelivered &&
+        event.by === handlerIdentity(request.handler)
+      );
+    case "done":
+      if (request.handling === "unknown") return event.result === undefined;
+    // Falls through to the acknowledgement check.
+    case "unknown":
+      return request.handling === "claimed" && event.by === request.claimedBy;
+    case "abandoned":
+      return (
+        request.handling === "unknown" ||
+        (request.handling === "unclaimed" && request.transport === "abandoned")
+      );
+    default:
+      return false;
+  }
+}
+
+function apply(requests: Map<string, ActionRequest>, raw: unknown): void {
+  const event = object(raw, "Log event");
+  if (event.event === "request") {
+    logFields(event, "event", "request");
+    const request = readRequest(event.request);
+    if (requests.has(request.requestId)) throw new Error("Duplicate request ID");
     // Run again is one record: the new request closes the one it reruns.
     const rerun = request.rerunOf === undefined ? undefined : requests.get(request.rerunOf);
-    if (request.rerunOf !== undefined && rerun?.handling !== "unknown")
-      throw new Error("Invalid rerun record");
+    if (request.rerunOf !== undefined) {
+      if (rerun?.handling !== "unknown") throw new Error("Invalid rerun record");
+      const copied = [
+        "dashboard",
+        "target",
+        "snapshot",
+        "action",
+        "label",
+        "payload",
+        "handler",
+        "confirm",
+      ] as const;
+      if (copied.some((field) => canonical(rerun[field]) !== canonical(request[field])))
+        throw new Error("Rerun does not match the original request");
+    }
     requests.set(request.requestId, {
       ...request,
       mayBeDelivered: false,
@@ -198,30 +335,81 @@ function apply(requests: Map<string, ActionRequest>, raw: unknown): void {
       });
     return;
   }
-  const request = requests.get(event.requestId);
-  if (!request || typeof event.at !== "string") throw new Error("Event for an unknown request");
-  request.updatedAt = event.at;
+  const request = requests.get(text(event.requestId, "Request ID"));
+  if (!request || !logDate(event.at)) throw new Error("Invalid event request or time");
   if (event.event === "transport") {
-    if (!TRANSPORTS.has(event.transport)) throw new Error("Invalid transport");
-    request.transport = event.transport;
-    if (event.transport === "sending" || event.leaseUntil) request.mayBeDelivered = true;
-    if (event.attempts !== undefined) request.attempts = event.attempts;
-    for (const field of ["nextAttemptAt", "error"] as const) {
-      if (event[field] === null) delete request[field];
-      else if (event[field] !== undefined) request[field] = event[field];
+    logFields(
+      event,
+      "event",
+      "requestId",
+      "at",
+      "transport",
+      "by",
+      "attempts",
+      "nextAttemptAt",
+      "error",
+      "receipt",
+      "leaseUntil",
+    );
+    if (event.by !== undefined) text(event.by, "Actor");
+    if (event.attempts !== undefined) integer(event.attempts, "Attempts");
+    if (
+      (event.nextAttemptAt != null && !logDate(event.nextAttemptAt)) ||
+      (event.error != null && typeof event.error !== "string") ||
+      (event.attempts !== undefined &&
+        !["queued", "sending", "failed", "stalled"].includes(String(event.transport))) ||
+      (event.nextAttemptAt !== undefined &&
+        !["queued", "failed", "stalled"].includes(String(event.transport))) ||
+      (event.leaseUntil !== undefined &&
+        (!logDate(event.leaseUntil) || event.transport !== "delivered" || !isPull(request.handler)))
+    )
+      throw new Error("Invalid transport fields");
+    if (event.receipt !== undefined) {
+      if (event.transport !== "delivered" || isPull(request.handler))
+        throw new Error("Unexpected delivery receipt");
+      const receipt = logFields(event.receipt, "messageId", "runId");
+      if (
+        typeof receipt.messageId !== "string" ||
+        !receipt.messageId ||
+        (receipt.runId !== undefined && typeof receipt.runId !== "string")
+      )
+        throw new Error("Invalid delivery receipt");
     }
-    if (event.receipt) request.receipt = event.receipt;
-    if (event.leaseUntil) request.leaseUntil = event.leaseUntil;
+    const change = event as unknown as TransportEvent;
+    if (!canApplyTransport(request, change)) throw new Error("Invalid transport transition");
+    request.updatedAt = change.at;
+    request.transport = change.transport;
+    if (change.transport === "sending" || change.leaseUntil) request.mayBeDelivered = true;
+    if (change.attempts !== undefined) request.attempts = change.attempts;
+    for (const field of ["nextAttemptAt", "error"] as const) {
+      if (change[field] === null) delete request[field];
+      else if (change[field] !== undefined) request[field] = change[field];
+    }
+    if (change.receipt) request.receipt = change.receipt;
+    if (change.leaseUntil) request.leaseUntil = change.leaseUntil;
     return;
   }
   if (event.event === "handling") {
-    if (!HANDLINGS.has(event.handling)) throw new Error("Invalid handling");
-    request.handling = event.handling;
-    if (event.handling === "claimed") {
-      request.claimedBy = event.by;
-      request.claimedAt = event.at;
+    logFields(event, "event", "requestId", "at", "handling", "by", "result");
+    const by = text(event.by, "Actor");
+    if (event.result !== undefined && event.handling !== "done" && event.handling !== "unknown")
+      throw new Error("Unexpected action result");
+    if (event.result !== undefined) {
+      const result = logFields(event.result, "label", "href");
+      // The writer truncates after checking the label, so a stored label may be all whitespace.
+      if (typeof result.label !== "string" || !result.label || result.label.length > 500)
+        throw new Error("Invalid logged result label");
+      if (result.href !== undefined) resultHref(result.href);
     }
-    if (event.result) request.result = event.result;
+    const change = event as unknown as HandlingEvent;
+    if (!canApplyHandling(request, change)) throw new Error("Invalid handling transition");
+    request.updatedAt = change.at;
+    request.handling = change.handling;
+    if (change.handling === "claimed") {
+      request.claimedBy = by;
+      request.claimedAt = change.at;
+    }
+    if (change.result) request.result = change.result;
     return;
   }
   throw new Error("Unknown log event");
@@ -368,24 +556,26 @@ function integer(value: unknown, label: string): number {
   return value;
 }
 
+function resultHref(value: unknown): string {
+  const href = text(value, "Result href");
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    throw new HttpError(400, "Result href must be a URL");
+  }
+  if (!["http:", "https:", "t3-thread:"].includes(url.protocol))
+    throw new HttpError(400, "Result href must use http, https or t3-thread");
+  return url.href;
+}
+
 function resultValue(value: unknown): ActionResult | undefined {
   if (value === undefined) return undefined;
   const input = object(value, "Result");
   if (Object.keys(input).some((key) => !["label", "href"].includes(key)))
     throw new HttpError(400, "Result has only label and href");
   const result: ActionResult = { label: text(input.label, "Result label").slice(0, 500) };
-  if (input.href !== undefined) {
-    const href = text(input.href, "Result href");
-    let url: URL;
-    try {
-      url = new URL(href);
-    } catch {
-      throw new HttpError(400, "Result href must be a URL");
-    }
-    if (!["http:", "https:", "t3-thread:"].includes(url.protocol))
-      throw new HttpError(400, "Result href must use http, https or t3-thread");
-    result.href = url.href;
-  }
+  if (input.href !== undefined) result.href = resultHref(input.href);
   return result;
 }
 
@@ -433,12 +623,6 @@ export class ActionStore {
       if ((await readLog(candidate.directory)).requests.has(requestId)) return candidate;
     }
     throw new HttpError(404, requestId ? "Action request not found" : "Dashboard not found");
-  }
-
-  private async request(directory: string, requestId: string): Promise<ActionRequest> {
-    const request = (await prepareAppend(directory)).requests.get(requestId);
-    if (!request) throw new HttpError(404, "Action request not found");
-    return request;
   }
 
   async accept(
@@ -534,10 +718,10 @@ export class ActionStore {
         at,
         transport: action.confirm ? "awaiting-confirmation" : "queued",
       };
-      await append(directory, [{ event: "request", request }]);
-      const reduced = new Map<string, ActionRequest>();
-      apply(reduced, { event: "request", request });
-      return { request: reduced.get(request.requestId)!, existing: false };
+      const event: RequestEvent = { event: "request", request };
+      apply(requests, event);
+      await append(directory, [event]);
+      return { request: requests.get(request.requestId)!, existing: false };
     });
   }
 
@@ -686,12 +870,13 @@ export class ActionStore {
     return await this.store.exclusive(id, async () => {
       const located = await this.locate(id, requestId);
       if (options.live && !located.live) throw new HttpError(404, "Dashboard was removed");
-      const request = await this.request(located.directory, requestId);
+      const { requests } = await prepareAppend(located.directory);
+      const request = requests.get(requestId);
+      if (!request) throw new HttpError(404, "Action request not found");
       const changes = events(request, this.at());
+      for (const change of changes) apply(requests, change);
       await append(located.directory, changes);
-      const reduced = new Map([[requestId, structuredClone(request)]]);
-      for (const change of changes) if (change.event !== "request") apply(reduced, change);
-      return reduced.get(requestId)!;
+      return request;
     });
   }
 
@@ -823,8 +1008,7 @@ export class ActionStore {
       const recovered = [...requests.values()]
         .filter(
           (request) =>
-            request.handling === "unclaimed" &&
-            ["queued", "sending", "failed", "delivered"].includes(request.transport),
+            request.handling === "unclaimed" && REPAIRABLE_TRANSPORTS.has(request.transport),
         )
         .map((request) =>
           JSON.stringify({
@@ -833,7 +1017,7 @@ export class ActionStore {
             transport: "ambiguous",
             at,
             by,
-            error: "Action log was repaired; check before retrying",
+            error: REPAIR_ERROR,
           } satisfies TransportEvent),
         );
       const temporary = join(dirname(path), `.tmp-${randomUUID()}`);
