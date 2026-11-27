@@ -233,7 +233,9 @@ function renderRow({ d, project, questions, health: state }) {
   const row = el("article", undefined, `row ${state}`);
   const main = el("div", undefined, "row-main");
   const title = el("div", undefined, "row-title");
-  title.append(link(d.manifest.title, d.url));
+  const dashboard = link(undefined, d.url, "row-link");
+  dashboard.append(el("span", d.manifest.title));
+  title.append(dashboard);
   if (d.manifest.pinned) title.append(el("span", "Pinned", "tag"));
   if (questions.length) {
     const count = el("span", String(questions.length), "tag needs");
