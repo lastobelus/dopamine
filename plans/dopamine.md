@@ -1,6 +1,6 @@
 # Dopamine
 
-**Status:** In Progress. Phase 1a is built and deployed; all its acceptance checks except the reboot have been observed (see "Phase 1a is done when"). Phase 1b (actions) is built, deployed and its acceptance checks observed (see "Phase 1b is done when"). Phase 2 (a LastCode change) is built; an installation gets it with its next LastCode build. Phase 3 is decided after a week of real use.
+**Status:** In Progress. Phase 1a is built and deployed; all its acceptance checks except the reboot have been observed (see "Phase 1a is done when"). Phase 1b (actions) is built, deployed and its acceptance checks observed (see "Phase 1b is done when"). Phase 2 (a LastCode change) is built; an installation gets it with its next LastCode build. Phase 3's design investigation is done; whether to build it is decided after a week of real use.
 
 This plan describes dopamine itself, for anyone running it with LastCode or T3 Code across more than one environment. It never names a particular installation. A specific installation keeps its own private plan: which machines, ports, service files and tunnels it uses, and which of the acceptance checks below it has observed.
 
@@ -222,6 +222,16 @@ Built in [lastCode#852](https://github.com/lastobelus/lastCode/pull/852), merged
 ## Phase 3: a tab that follows the reader (decided after a week of phase 1)
 
 A pinned dashboard tab stays in the panel as the reader switches threads: closed in the thread being left and opened at the same address in the thread being entered, in a fork-owned module calling existing panel-store functions. It starts as a design investigation with its own plan. Decide with a week's evidence: how often the hub is reopened per thread, and what per-thread copies cost in renderer processes.
+
+### Design investigation
+
+[The design plan](https://github.com/lastobelus/lastCode/blob/cd739d52870e99050206b7a160c83f091114174a/plans/dopamine-pinned-dashboard-tab.md) (lastCode#880) recommends keeping phase 2 and deferring automatic following:
+
+- **Copies cost memory.** Each extra loaded copy of the hub index or a dashboard shell used one renderer process of roughly 100–120 MiB resident in a background test. Normal foreground tabs may differ, so measure those if memory decides it.
+- **Reopens can't be counted yet.** Retained tabs show dashboards open in several threads, but no existing record says how often a reader reopened one, so there is no reopen rate for the first week.
+- **The smaller option.** If a tally of reopens shows repeated friction, an explicit "Open last dashboard" action comes before a tab that follows the reader.
+
+Building any of it is a separate decision.
 
 ## Later
 
