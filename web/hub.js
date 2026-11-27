@@ -238,9 +238,8 @@ function renderRow({ d, project, questions, health: state }) {
   title.append(dashboard);
   if (d.manifest.pinned) title.append(el("span", "Pinned", "tag"));
   if (questions.length) {
-    const count = el("span", String(questions.length), "tag needs");
-    count.title = `${questions.length} open question${questions.length === 1 ? "" : "s"}`;
-    title.append(count);
+    dashboard.title = `${questions.length} open question${questions.length === 1 ? "" : "s"}`;
+    title.append(el("span", String(questions.length), "tag needs"));
   }
   const meta = el("div", undefined, "meta");
   if (project) meta.append(el("span", project.title));

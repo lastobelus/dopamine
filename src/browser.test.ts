@@ -47,7 +47,7 @@ describe("hub list links", () => {
         ownerThreadUrl: "t3-thread://v2/environment/thread",
         updatedAt: new Date().toISOString(),
       },
-      questions: [],
+      questions: [{ key: "first" }],
       health: "down",
     };
     const controls = (node: Element): Element[] =>
@@ -55,7 +55,12 @@ describe("hub list links", () => {
     const rowControls = controls(renderRow(dashboard));
     expect(rowControls).toHaveLength(4);
     const [title, owner, copy, remove] = rowControls;
-    expect(title).toMatchObject({ tag: "a", className: "row-link", href: dashboard.d.url });
+    expect(title).toMatchObject({
+      tag: "a",
+      className: "row-link",
+      href: dashboard.d.url,
+      title: "1 open question",
+    });
     expect(title!.children).toMatchObject([{ tag: "span", textContent: "Example" }]);
     expect(owner).toMatchObject({ tag: "a", href: dashboard.d.ownerThreadUrl });
     expect(copy).toMatchObject({ tag: "button", attributes: { "aria-label": "Copy link" } });
