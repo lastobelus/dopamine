@@ -330,6 +330,7 @@ function render(data) {
   dopamine.subscribe(render, showError);
   ready = true;
 })();
+// The shared client emits this private event on Refresh.
 addEventListener("dopamine:refresh", () => {
   if (!manifest) void loadMeta();
 });

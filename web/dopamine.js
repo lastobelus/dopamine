@@ -25,11 +25,9 @@
       body: JSON.stringify(value),
     });
   let facts, metadataRequest, back, latest;
-  const dataReaders = new Set();
-  const requestReaders = new Set();
-  const readOutcomes = new Map();
-  let refreshButton, freshness, staleTimer, checkedAt, refreshPending;
-  let freshnessText = "Snapshot pending";
+  const dataReaders = new Map();
+  const requestReaders = new Map();
+  let refreshButton, freshness, staleTimer, refreshPending;
   const remember = (data) => {
     latest = data;
     return data;
@@ -84,31 +82,28 @@
       return result;
     };
   }
-  const readAll = (readers) => Promise.all([...readers].map((read) => read()));
+  const readAll = (readers) => Promise.all([...readers.keys()].map((read) => read()));
   const notify = () => void readAll(requestReaders);
-  function showFreshness(text) {
-    freshnessText = text;
-    if (freshness) freshness.textContent = text;
-  }
-  function checked() {
-    checkedAt = new Date();
+  function reportReadState() {
+    if (!freshness) return;
     clearTimeout(staleTimer);
-    showFreshness(
-      `Checked at ${checkedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`,
-    );
-    if (freshness) staleTimer = setTimeout(() => showFreshness("Stale snapshot"), 60_000);
-  }
-  function unverified(text) {
-    checkedAt = undefined;
-    clearTimeout(staleTimer);
-    showFreshness(text);
-  }
-  function reportReadState(failure) {
-    const outcomes = [...readOutcomes.values()];
-    if (!outcomes.length) return;
-    if (outcomes.includes(false)) unverified(failure);
-    else if (outcomes.every(Boolean)) checked();
-    else unverified("Snapshot pending");
+    const outcomes = [...dataReaders.values(), ...requestReaders.values()];
+    if (outcomes.includes(false)) {
+      freshness.textContent = "Refresh needed";
+      return;
+    }
+    if (!outcomes.length || outcomes.includes(undefined)) {
+      freshness.textContent = "Snapshot pending";
+      return;
+    }
+    const at = Math.min(...outcomes);
+    const remaining = 60_000 - (Date.now() - at);
+    if (remaining <= 0) {
+      freshness.textContent = "Stale snapshot";
+      return;
+    }
+    freshness.textContent = `Checked at ${new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+    staleTimer = setTimeout(reportReadState, remaining);
   }
   function refresh() {
     if (refreshPending) return refreshPending;
@@ -120,7 +115,6 @@
       })
       .finally(() => {
         refreshPending = undefined;
-        reportReadState("Refresh failed");
         if (refreshButton) refreshButton.disabled = false;
       });
     return refreshPending;
@@ -136,14 +130,13 @@
     control.style.padding = "0.5rem 1rem";
     freshness = document.createElement("span");
     freshness.setAttribute("role", "status");
-    freshness.textContent = freshnessText;
     refreshButton = document.createElement("button");
     refreshButton.type = "button";
     refreshButton.textContent = "Refresh";
     refreshButton.addEventListener("click", () => void refresh());
     control.append(freshness, " ", refreshButton);
     document.body.prepend(control);
-    if (checkedAt) checked();
+    reportReadState();
   }
   function observe(readers, load, onError) {
     let stopped = false;
@@ -154,28 +147,27 @@
         if (stopped) return;
         try {
           await load(active);
-          if (!stopped) readOutcomes.set(update, true);
+          if (!stopped) readers.set(update, Date.now());
         } catch (error) {
           if (!stopped) {
-            readOutcomes.set(update, false);
+            readers.set(update, false);
             onError(error);
           }
+        } finally {
+          if (!stopped) reportReadState();
         }
       });
       pending = result.catch(() => {});
       return result;
     };
-    readers.add(update);
-    readOutcomes.set(update, undefined);
+    readers.set(update, undefined);
+    reportReadState();
     addRefreshControl();
-    if (!refreshPending) reportReadState("Refresh needed");
-    void update().then(() => {
-      if (!stopped && !refreshPending) reportReadState("Refresh needed");
-    });
+    void update();
     return () => {
       stopped = true;
       readers.delete(update);
-      readOutcomes.delete(update);
+      reportReadState();
     };
   }
   addEventListener("message", (event) => {

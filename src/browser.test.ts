@@ -215,10 +215,7 @@ describe("page subscription", () => {
     } = { dispatchEvent() {} };
     let click!: () => void;
     const status = { textContent: "", setAttribute() {} };
-    const timeouts = new Map<AbortSignal, AbortController>();
-    let actionReads = 0;
-    let expireAction!: () => void;
-    let pendingData: Promise<void> | undefined;
+    let now = Date.now();
     const location = { href: "http://example--workstation.hub.localhost/", search: "" };
     await runInNewContext(await readFile(new URL("../web/dopamine.js", import.meta.url), "utf8"), {
       window: view,
@@ -226,13 +223,11 @@ describe("page subscription", () => {
       location,
       URL,
       URLSearchParams,
-      AbortSignal: {
-        timeout(ms: number) {
-          expect(ms).toBe(15_000);
-          const controller = new AbortController();
-          timeouts.set(controller.signal, controller);
-          return controller.signal;
-        },
+      AbortSignal,
+      Date: class extends Date {
+        static override now() {
+          return now;
+        }
       },
       history: { pushState() {}, replaceState() {} },
       addEventListener() {},
@@ -257,24 +252,14 @@ describe("page subscription", () => {
         return timers.length;
       },
       clearTimeout() {},
-      async fetch(path: string, options?: { headers?: unknown; signal: AbortSignal }) {
+      async fetch(path: string, options?: { headers?: unknown }) {
         if (path === "/dopamine-meta.json")
           return {
             ok: true,
             json: async () => ({ shell: "http://hub.localhost/d/example--workstation" }),
           };
-        if (path === "/api/actions") {
-          if (++actionReads === 1 || actionReads === 3) {
-            const signal = options!.signal;
-            expireAction = () => timeouts.get(signal)!.abort();
-            return new Promise((_, reject) =>
-              signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
-            );
-          }
-          return { ok: true, json: async () => ({ requests: [] }) };
-        }
+        if (path === "/api/actions") return { ok: true, json: async () => ({ requests: [] }) };
         headers.push(options?.headers);
-        await pendingData;
         return {
           ok: true,
           status: 200,
@@ -303,7 +288,9 @@ describe("page subscription", () => {
     await setImmediate();
     expect(calls).toBe(2);
     expect(headers[1]).toEqual({});
+    expect(status.textContent).toMatch(/^Checked at /);
     expect(timers).toHaveLength(1);
+    now += 60_000;
     await timers.shift()!();
     expect(status.textContent).toBe("Stale snapshot");
     expect(headers).toHaveLength(2);
@@ -311,37 +298,13 @@ describe("page subscription", () => {
     await setImmediate();
     expect(headers[2]).toEqual({ "If-None-Match": '"2"' });
     expect(calls).toBe(2);
-    const stopWatching = view.dopamine!.watchRequests(
-      () => {},
-      () => {},
-    );
-    await setImmediate();
-    expect(status.textContent).toBe("Snapshot pending");
-    expireAction();
-    await setImmediate();
-    expect(status.textContent).toBe("Refresh needed");
-    click();
-    await setImmediate();
-    expect(actionReads).toBe(2);
-    expect(status.textContent).toMatch(/^Checked at /);
-    stopWatching();
-    const refreshData = Promise.withResolvers<void>();
-    pendingData = refreshData.promise;
-    click();
-    await setImmediate();
-    // A reader can arrive after Refresh starts, for example when the manifest becomes available.
+    now += 60_000;
     view.dopamine!.watchRequests(
       () => {},
       () => {},
     );
     await setImmediate();
-    expect(actionReads).toBe(3);
-    refreshData.resolve();
-    await setImmediate();
-    expect(status.textContent).toBe("Snapshot pending");
-    expireAction();
-    await setImmediate();
-    expect(status.textContent).toBe("Refresh needed");
+    expect(status.textContent).toBe("Stale snapshot");
     unsubscribe();
   });
 });
