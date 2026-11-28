@@ -367,7 +367,7 @@ export async function startHub(
       throw new HttpError(503, "Peer is unreachable");
     }
   }
-  async function probeUrl(address: string): Promise<{ status: string; frameAllowed: boolean }> {
+  async function readUrlProbe(address: string): Promise<{ status: string; frameAllowed: boolean }> {
     const registered = new URL(address);
     try {
       const request = (target: URL) => {
@@ -395,6 +395,25 @@ export async function startHub(
     } catch {
       return { status: "unreachable", frameAllowed: true };
     }
+  }
+  const urlProbes = new Map<
+    string,
+    { result: ReturnType<typeof readUrlProbe>; expiresAt: number }
+  >();
+  function probeUrl(address: string) {
+    const key = new URL(address).href;
+    const time = now();
+    const previous = urlProbes.get(key);
+    if (previous && previous.expiresAt > time) return previous.result;
+    for (const [url, entry] of urlProbes) {
+      if (entry.expiresAt <= time) urlProbes.delete(url);
+    }
+    const entry = { result: readUrlProbe(key), expiresAt: Infinity };
+    urlProbes.set(key, entry);
+    void entry.result.then(({ status }) => {
+      entry.expiresAt = now() + (status === "reachable" ? 30_000 : 5_000);
+    });
+    return entry.result;
   }
   async function summary(record: DashboardRecord): Promise<Summary> {
     const key = `${record.manifest.id}--${record.manifest.machine}`;

@@ -13,7 +13,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.toReversed()) await cleanup();
   cleanups.length = 0;
 });
-async function fixture(extra: Partial<HubConfig> = {}) {
+async function fixture(extra: Partial<HubConfig> = {}, options?: Parameters<typeof startHub>[1]) {
   const root = await mkdtemp(join(await realpath(tmpdir()), "hub-test-"));
   const token = randomBytes(32).toString("hex"),
     secret = randomBytes(32).toString("hex");
@@ -21,17 +21,20 @@ async function fixture(extra: Partial<HubConfig> = {}) {
     peerCredentialFile = join(root, "peer-secret");
   await writeFile(tokenFile, token, { mode: 0o600 });
   await writeFile(peerCredentialFile, secret, { mode: 0o600 });
-  const hub = await startHub({
-    machine: "workstation",
-    hubId: "hub-example",
-    port: 0,
-    dataRoot: join(root, "dashboards"),
-    tokenFile,
-    peerCredentialFile,
-    dashboardDomain: "hub.localhost",
-    viewingOrigin: "http://hub.localhost:0",
-    ...extra,
-  });
+  const hub = await startHub(
+    {
+      machine: "workstation",
+      hubId: "hub-example",
+      port: 0,
+      dataRoot: join(root, "dashboards"),
+      tokenFile,
+      peerCredentialFile,
+      dashboardDomain: "hub.localhost",
+      viewingOrigin: "http://hub.localhost:0",
+      ...extra,
+    },
+    options,
+  );
   cleanups.push(() => rm(root, { recursive: true, force: true }), hub.close);
   return { ...hub, token, secret, root, peerCredentialFile };
 }
@@ -460,7 +463,9 @@ describe("hub HTTP boundaries", () => {
 });
 
 async function website(deny: boolean, options: { redirect?: boolean; ancestors?: string } = {}) {
+  let hits = 0;
   const server = createServer((req, res) => {
+    hits++;
     if (options.redirect && req.url === "/") {
       res.writeHead(302, { location: "/app" });
       res.end();
@@ -480,10 +485,26 @@ async function website(deny: boolean, options: { redirect?: boolean; ancestors?:
       else resolve();
     });
   cleanups.push(close);
-  return { origin: `http://website.localhost:${address.port}`, close };
+  return { origin: `http://website.localhost:${address.port}`, close, hits: () => hits };
 }
 
 describe("local URL dashboard overrides", () => {
+  it("shares concurrent and recent URL probes across shell and index reads", async () => {
+    let now = Date.now();
+    const source = await website(false);
+    const hub = await fixture({}, { now: () => now });
+    await hub.store.create({ id: "example", title: "Example", kind: "url", url: source.origin });
+    const paths = ["/api/shell/example--workstation", "/api/index", "/api/list"];
+    const replies = await Promise.all(paths.map((path) => send(hub, path)));
+    expect(replies.map((reply) => reply.status)).toEqual([200, 200, 200]);
+    expect(source.hits()).toBe(1);
+    await send(hub, "/api/index");
+    expect(source.hits()).toBe(1);
+    now += 30_000;
+    await send(hub, "/api/index");
+    expect(source.hits()).toBe(2);
+  });
+
   it("checks the framing policy of the document reached by a same-origin redirect", async () => {
     const source = await website(true, { redirect: true });
     const hub = await fixture();
@@ -704,19 +725,23 @@ describe("authenticated peer routing", () => {
     ).toBe(200);
   });
   it("probes remote URL dashboards from the viewing side after applying their URL override", async () => {
+    let now = Date.now();
     const source = await website(false),
       viewing = await website(true);
     const peer = await fixture({ machine: "worker", hubId: "peer-hub" });
-    const hub = await fixture({
-      peer: {
-        machine: "worker",
-        hubId: "peer-hub",
-        origin: `http://127.0.0.1:${peer.port}`,
-        host: `127.0.0.1:${peer.port}`,
+    const hub = await fixture(
+      {
+        peer: {
+          machine: "worker",
+          hubId: "peer-hub",
+          origin: `http://127.0.0.1:${peer.port}`,
+          host: `127.0.0.1:${peer.port}`,
+        },
+        peerCredentialFile: peer.peerCredentialFile,
+        urlOverrides: { "example--worker": viewing.origin },
       },
-      peerCredentialFile: peer.peerCredentialFile,
-      urlOverrides: { "example--worker": viewing.origin },
-    });
+      { now: () => now },
+    );
     peer.config.viewingOrigin = hub.config.viewingOrigin;
     await peer.store.create({
       id: "example",
@@ -732,6 +757,8 @@ describe("authenticated peer routing", () => {
       manifest: { url: viewing.origin },
     });
     await viewing.close();
+    expect((await send(hub, "/api/index")).value().dashboards[0].status).toBe("reachable");
+    now += 30_000;
     const down = (await send(hub, "/api/index")).value();
     expect(down.peer.reachable).toBe(true);
     expect(down.dashboards[0].status).toBe("unreachable");
