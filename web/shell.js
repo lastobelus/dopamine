@@ -21,9 +21,16 @@ function updateDirect() {
   document.querySelector("#direct").href = direct.href;
   document.querySelector("#outside").href = direct.href;
 }
-async function refresh() {
+let refreshPending = Promise.resolve();
+function refresh() {
+  refreshPending = refreshPending.then(readStatus);
+  return refreshPending;
+}
+async function readStatus() {
   try {
-    const response = await fetch(`/api/shell/${encodeURIComponent(key)}`);
+    const response = await fetch(`/api/shell/${encodeURIComponent(key)}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
     if (!response.ok)
       throw new Error(
         "Can't reach this dashboard right now. Anything shown below may be out of date.",

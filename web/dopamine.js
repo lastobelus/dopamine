@@ -1,7 +1,9 @@
 /* eslint-disable unicorn/consistent-function-scoping -- Keep the public client isolated from page globals. */
 (() => {
+  const fetchWithDeadline = (path, options) =>
+    fetch(path, { ...options, signal: AbortSignal.timeout(15_000) });
   const request = async (path, options) => {
-    const response = await fetch(path, options);
+    const response = options ? await fetch(path, options) : await fetchWithDeadline(path);
     if (!response.ok) {
       let details = {};
       try {
@@ -25,6 +27,7 @@
   let facts, metadataRequest, back, latest;
   const dataReaders = new Set();
   const requestReaders = new Set();
+  const initialReads = new Map();
   let refreshButton, freshness, staleTimer, checkedAt, refreshPending;
   let freshnessText = "Snapshot pending";
   const remember = (data) => {
@@ -95,6 +98,18 @@
     );
     if (freshness) staleTimer = setTimeout(() => showFreshness("Stale snapshot"), 60_000);
   }
+  function unverified(text) {
+    checkedAt = undefined;
+    clearTimeout(staleTimer);
+    showFreshness(text);
+  }
+  function reportInitialReads() {
+    if (refreshPending || !initialReads.size) return;
+    const outcomes = [...initialReads.values()];
+    if (outcomes.includes(false)) unverified("Refresh needed");
+    else if (outcomes.every(Boolean)) checked();
+    else unverified("Snapshot pending");
+  }
   function refresh() {
     if (refreshPending) return refreshPending;
     if (refreshButton) refreshButton.disabled = true;
@@ -103,11 +118,7 @@
         window.dispatchEvent(new Event("dopamine:refresh"));
         const results = await Promise.all([readAll(dataReaders), readAll(requestReaders)]);
         if (results.flat().every(Boolean)) checked();
-        else {
-          checkedAt = undefined;
-          clearTimeout(staleTimer);
-          showFreshness("Refresh failed");
-        }
+        else unverified("Refresh failed");
       })
       .finally(() => {
         refreshPending = undefined;
@@ -144,9 +155,13 @@
         if (stopped) return true;
         try {
           await load(active);
+          if (!stopped) initialReads.set(update, true);
           return true;
         } catch (error) {
-          if (!stopped) onError(error);
+          if (!stopped) {
+            initialReads.set(update, false);
+            onError(error);
+          }
           return false;
         }
       });
@@ -154,16 +169,16 @@
       return result;
     };
     readers.add(update);
+    initialReads.set(update, undefined);
     addRefreshControl();
-    void update().then((ok) => {
-      if (!stopped && !checkedAt && (readers === dataReaders || !dataReaders.size)) {
-        if (ok) checked();
-        else showFreshness("Refresh needed");
-      }
+    reportInitialReads();
+    void update().then(() => {
+      if (!stopped) reportInitialReads();
     });
     return () => {
       stopped = true;
       readers.delete(update);
+      initialReads.delete(update);
     };
   }
   addEventListener("message", (event) => {
@@ -216,7 +231,7 @@
       return observe(
         dataReaders,
         async (active) => {
-          const response = await fetch("/data.json", {
+          const response = await fetchWithDeadline("/data.json", {
             headers: etag ? { "If-None-Match": etag } : {},
           });
           if ((response.ok || response.status === 304) && !facts) void metadata().catch(() => {});

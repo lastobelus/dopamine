@@ -36,6 +36,7 @@ describe("hub list links", () => {
         },
         location: { search: "" },
         URLSearchParams,
+        AbortSignal,
         fetch: () => new Promise(() => {}),
         setInterval() {},
       },
@@ -92,6 +93,8 @@ describe("shell framing changes", () => {
     nodes["#dashboard"] = frame;
     const timers: (() => void)[] = [];
     const events: Record<string, (event: unknown) => void> = {};
+    const initial = Promise.withResolvers<void>();
+    let reads = 0;
     const location = { pathname: "/d/example--worker", search: "", hash: "" };
     let allowed = true,
       address = "http://example.localhost/#/reports";
@@ -118,11 +121,13 @@ describe("shell framing changes", () => {
       },
       URL,
       URLSearchParams,
+      AbortSignal,
       addEventListener: (name: string, callback: (event: unknown) => void) => {
         events[name] = callback;
       },
       setInterval: (callback: () => void) => timers.push(callback),
       async fetch() {
+        if (++reads === 1) await initial.promise;
         return {
           ok: true,
           json: async () => ({
@@ -135,6 +140,12 @@ describe("shell framing changes", () => {
       },
     });
     await setImmediate();
+    events.click!(undefined);
+    await setImmediate();
+    expect(reads).toBe(1);
+    initial.resolve();
+    await setImmediate();
+    expect(reads).toBe(2);
     expect(timers).toHaveLength(0);
     expect(navigations).toHaveLength(1);
     expect(navigations[0]).toBe(address);
@@ -198,11 +209,15 @@ describe("page subscription", () => {
     const view: {
       dopamine?: {
         subscribe: (callback: () => void, error: () => void) => () => void;
+        watchRequests: (callback: () => void, error: () => void) => () => void;
       };
       dispatchEvent: () => void;
     } = { dispatchEvent() {} };
     let click!: () => void;
     const status = { textContent: "", setAttribute() {} };
+    const timeouts = new Map<AbortSignal, AbortController>();
+    let actionReads = 0;
+    let expireAction!: () => void;
     const location = { href: "http://example--workstation.hub.localhost/", search: "" };
     await runInNewContext(await readFile(new URL("../web/dopamine.js", import.meta.url), "utf8"), {
       window: view,
@@ -210,6 +225,14 @@ describe("page subscription", () => {
       location,
       URL,
       URLSearchParams,
+      AbortSignal: {
+        timeout(ms: number) {
+          expect(ms).toBe(15_000);
+          const controller = new AbortController();
+          timeouts.set(controller.signal, controller);
+          return controller.signal;
+        },
+      },
       history: { pushState() {}, replaceState() {} },
       addEventListener() {},
       Event,
@@ -233,12 +256,22 @@ describe("page subscription", () => {
         return timers.length;
       },
       clearTimeout() {},
-      async fetch(path: string, options?: { headers?: unknown }) {
+      async fetch(path: string, options?: { headers?: unknown; signal: AbortSignal }) {
         if (path === "/dopamine-meta.json")
           return {
             ok: true,
             json: async () => ({ shell: "http://hub.localhost/d/example--workstation" }),
           };
+        if (path === "/api/actions") {
+          if (++actionReads === 1) {
+            const signal = options!.signal;
+            expireAction = () => timeouts.get(signal)!.abort();
+            return new Promise((_, reject) =>
+              signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+            );
+          }
+          return { ok: true, json: async () => ({ requests: [] }) };
+        }
         headers.push(options?.headers);
         return {
           ok: true,
@@ -276,6 +309,19 @@ describe("page subscription", () => {
     await setImmediate();
     expect(headers[2]).toEqual({ "If-None-Match": '"2"' });
     expect(calls).toBe(2);
+    view.dopamine!.watchRequests(
+      () => {},
+      () => {},
+    );
+    await setImmediate();
+    expect(status.textContent).toBe("Snapshot pending");
+    expireAction();
+    await setImmediate();
+    expect(status.textContent).toBe("Refresh needed");
+    click();
+    await setImmediate();
+    expect(actionReads).toBe(2);
+    expect(status.textContent).toMatch(/^Checked at /);
     unsubscribe();
   });
 });
@@ -303,6 +349,7 @@ describe("page metadata recovery", () => {
       location,
       URL,
       URLSearchParams,
+      AbortSignal,
       history: { pushState() {}, replaceState() {} },
       addEventListener() {},
       document: {
@@ -421,6 +468,7 @@ async function shell(search = "") {
     },
     URL,
     URLSearchParams,
+    AbortSignal,
     Intl,
     addEventListener: (name: string, callback: (event: unknown) => void) => {
       events[name] = callback;
@@ -535,6 +583,7 @@ describe("page actions", () => {
       location: { href: "http://example--workstation.hub.localhost/", search: "", pathname: "/" },
       URL,
       URLSearchParams,
+      AbortSignal,
       crypto,
       history: { pushState() {}, replaceState() {} },
       addEventListener() {},
@@ -577,6 +626,7 @@ describe("page actions", () => {
       location: { href: "http://example--workstation.hub.localhost/", search: "", pathname: "/" },
       URL,
       URLSearchParams,
+      AbortSignal,
       crypto,
       Event,
       history: { pushState() {}, replaceState() {} },
