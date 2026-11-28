@@ -27,7 +27,7 @@
   let facts, metadataRequest, back, latest;
   const dataReaders = new Set();
   const requestReaders = new Set();
-  const initialReads = new Map();
+  const readOutcomes = new Map();
   let refreshButton, freshness, staleTimer, checkedAt, refreshPending;
   let freshnessText = "Snapshot pending";
   const remember = (data) => {
@@ -103,10 +103,10 @@
     clearTimeout(staleTimer);
     showFreshness(text);
   }
-  function reportInitialReads() {
-    if (refreshPending || !initialReads.size) return;
-    const outcomes = [...initialReads.values()];
-    if (outcomes.includes(false)) unverified("Refresh needed");
+  function reportReadState(failure) {
+    const outcomes = [...readOutcomes.values()];
+    if (!outcomes.length) return;
+    if (outcomes.includes(false)) unverified(failure);
     else if (outcomes.every(Boolean)) checked();
     else unverified("Snapshot pending");
   }
@@ -116,12 +116,11 @@
     refreshPending = Promise.resolve()
       .then(async () => {
         window.dispatchEvent(new Event("dopamine:refresh"));
-        const results = await Promise.all([readAll(dataReaders), readAll(requestReaders)]);
-        if (results.flat().every(Boolean)) checked();
-        else unverified("Refresh failed");
+        await Promise.all([readAll(dataReaders), readAll(requestReaders)]);
       })
       .finally(() => {
         refreshPending = undefined;
+        reportReadState("Refresh failed");
         if (refreshButton) refreshButton.disabled = false;
       });
     return refreshPending;
@@ -152,33 +151,31 @@
     const active = () => !stopped;
     const update = () => {
       const result = pending.then(async () => {
-        if (stopped) return true;
+        if (stopped) return;
         try {
           await load(active);
-          if (!stopped) initialReads.set(update, true);
-          return true;
+          if (!stopped) readOutcomes.set(update, true);
         } catch (error) {
           if (!stopped) {
-            initialReads.set(update, false);
+            readOutcomes.set(update, false);
             onError(error);
           }
-          return false;
         }
       });
       pending = result.catch(() => {});
       return result;
     };
     readers.add(update);
-    initialReads.set(update, undefined);
+    readOutcomes.set(update, undefined);
     addRefreshControl();
-    reportInitialReads();
+    if (!refreshPending) reportReadState("Refresh needed");
     void update().then(() => {
-      if (!stopped) reportInitialReads();
+      if (!stopped && !refreshPending) reportReadState("Refresh needed");
     });
     return () => {
       stopped = true;
       readers.delete(update);
-      initialReads.delete(update);
+      readOutcomes.delete(update);
     };
   }
   addEventListener("message", (event) => {

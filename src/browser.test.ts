@@ -218,6 +218,7 @@ describe("page subscription", () => {
     const timeouts = new Map<AbortSignal, AbortController>();
     let actionReads = 0;
     let expireAction!: () => void;
+    let pendingData: Promise<void> | undefined;
     const location = { href: "http://example--workstation.hub.localhost/", search: "" };
     await runInNewContext(await readFile(new URL("../web/dopamine.js", import.meta.url), "utf8"), {
       window: view,
@@ -263,7 +264,7 @@ describe("page subscription", () => {
             json: async () => ({ shell: "http://hub.localhost/d/example--workstation" }),
           };
         if (path === "/api/actions") {
-          if (++actionReads === 1) {
+          if (++actionReads === 1 || actionReads === 3) {
             const signal = options!.signal;
             expireAction = () => timeouts.get(signal)!.abort();
             return new Promise((_, reject) =>
@@ -273,6 +274,7 @@ describe("page subscription", () => {
           return { ok: true, json: async () => ({ requests: [] }) };
         }
         headers.push(options?.headers);
+        await pendingData;
         return {
           ok: true,
           status: 200,
@@ -309,7 +311,7 @@ describe("page subscription", () => {
     await setImmediate();
     expect(headers[2]).toEqual({ "If-None-Match": '"2"' });
     expect(calls).toBe(2);
-    view.dopamine!.watchRequests(
+    const stopWatching = view.dopamine!.watchRequests(
       () => {},
       () => {},
     );
@@ -322,6 +324,24 @@ describe("page subscription", () => {
     await setImmediate();
     expect(actionReads).toBe(2);
     expect(status.textContent).toMatch(/^Checked at /);
+    stopWatching();
+    const refreshData = Promise.withResolvers<void>();
+    pendingData = refreshData.promise;
+    click();
+    await setImmediate();
+    // A reader can arrive after Refresh starts, for example when the manifest becomes available.
+    view.dopamine!.watchRequests(
+      () => {},
+      () => {},
+    );
+    await setImmediate();
+    expect(actionReads).toBe(3);
+    refreshData.resolve();
+    await setImmediate();
+    expect(status.textContent).toBe("Snapshot pending");
+    expireAction();
+    await setImmediate();
+    expect(status.textContent).toBe("Refresh needed");
     unsubscribe();
   });
 });

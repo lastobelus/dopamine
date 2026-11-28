@@ -145,11 +145,12 @@ function call(
   headers: Record<string, string> = {},
   bytes?: Buffer,
   timeout = 5000,
+  signal?: AbortSignal,
 ): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(
       url,
-      { method, headers },
+      { method, headers, signal },
       (res) => {
         const chunks: Buffer[] = [];
         let size = 0;
@@ -369,11 +370,12 @@ export async function startHub(
   }
   async function readUrlProbe(address: string): Promise<{ status: string; frameAllowed: boolean }> {
     const registered = new URL(address);
+    const signal = AbortSignal.timeout(1000);
     try {
       const request = (target: URL) => {
         const probe = new URL(target);
         probe.hostname = "127.0.0.1";
-        return call(probe, "GET", { host: registered.host }, undefined, 1000);
+        return call(probe, "GET", { host: registered.host }, undefined, 1000, signal);
       };
       let target = registered;
       let result = await request(target);

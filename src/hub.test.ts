@@ -462,7 +462,10 @@ describe("hub HTTP boundaries", () => {
   });
 });
 
-async function website(deny: boolean, options: { redirect?: boolean; ancestors?: string } = {}) {
+async function website(
+  deny: boolean,
+  options: { redirect?: boolean; ancestors?: string; trickle?: boolean } = {},
+) {
   let hits = 0;
   const server = createServer((req, res) => {
     hits++;
@@ -474,6 +477,16 @@ async function website(deny: boolean, options: { redirect?: boolean; ancestors?:
     if (deny) res.setHeader("x-frame-options", "DENY");
     if (options.ancestors)
       res.setHeader("content-security-policy", `frame-ancestors ${options.ancestors}`);
+    if (options.trickle) {
+      res.write("Example server");
+      const stream = setInterval(() => res.write(" "), 50);
+      const finish = setTimeout(() => res.end(), 1750);
+      res.once("close", () => {
+        clearInterval(stream);
+        clearTimeout(finish);
+      });
+      return;
+    }
     res.end("Example server");
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -489,6 +502,19 @@ async function website(deny: boolean, options: { redirect?: boolean; ancestors?:
 }
 
 describe("local URL dashboard overrides", () => {
+  it("releases shared probes when a body keeps arriving past the deadline", async () => {
+    const source = await website(false, { trickle: true });
+    const hub = await fixture();
+    await hub.store.create({ id: "example", title: "Example", kind: "url", url: source.origin });
+    const [shell, index] = await Promise.all([
+      send(hub, "/api/shell/example--workstation"),
+      send(hub, "/api/index"),
+    ]);
+    expect(shell.value().status).toBe("unreachable");
+    expect(index.value().dashboards[0].status).toBe("unreachable");
+    expect(source.hits()).toBe(1);
+  });
+
   it("shares concurrent and recent URL probes across shell and index reads", async () => {
     let now = Date.now();
     const source = await website(false);
