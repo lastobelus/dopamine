@@ -65,6 +65,8 @@ The shell refuses framing. Its sandboxed iframe retains a separate dashboard ori
 
 An existing server that was stopped when its frame first opened may need a browser reload after it starts. Reachability probes update its status; they do not automatically reload an unchanged frame.
 
+The index and shell read metadata when opened and when the reader refreshes it. Concurrent URL probes share a result per effective URL. The hub retains successful probes for 30 seconds and failed probes for 5 seconds.
+
 The shell shows **Open directly** for framing restrictions the hub can determine from the response. The browser enforces broader framing policies and may refuse the frame. **Open directly** remains available in the shell bar.
 
 ## Dashboard routes
@@ -83,6 +85,8 @@ The validated Host chooses the dashboard. No query parameter selects another das
 | `POST /api/act`           | Record a click (below). 202 with the new request, 200 with an existing one.    |
 | `GET /api/actions`        | This dashboard's requests; `?collection=` and `?key=` select one item's.       |
 | `POST /api/request`       | The reader's choice on a request: `{requestId, choice}` (below).               |
+
+`dopamine.subscribe` and `dopamine.watchRequests` read once on registration and keep the page in place. The client adds **Refresh** and a snapshot age indicator as soon as the page registers either callback. Refresh re-reads both subscriptions. A page can also call `dopamine.refresh()` in response to a reader action. Request callbacks also run when the result changes after an action or its shell confirmation.
 
 A document navigation to a page origin redirects into its shell. Iframe loads and requests without navigation metadata are served directly. `?dopamine-direct=1` suppresses that presentation redirect; all origin and page policies still apply. Data, API, files and peer-forwarded requests are never redirected.
 

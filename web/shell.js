@@ -29,6 +29,8 @@ async function refresh() {
         "Can't reach this dashboard right now. Anything shown below may be out of date.",
       );
     dashboard = await response.json();
+    document.querySelector("#checked").textContent =
+      `Checked at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
     document.title = `${dashboard.manifest.title} · dopamine`;
     document.querySelector("#title").textContent =
       `${dashboard.manifest.title} · ${dashboard.manifest.machine}`;
@@ -200,4 +202,12 @@ void refresh().then(() => {
   );
   void showConfirmation(pending);
 });
-setInterval(() => void refresh(), 15000);
+const refreshButton = document.querySelector("#refresh");
+refreshButton.addEventListener("click", async () => {
+  refreshButton.disabled = true;
+  try {
+    await refresh();
+  } finally {
+    refreshButton.disabled = false;
+  }
+});

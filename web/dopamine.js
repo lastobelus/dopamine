@@ -23,7 +23,10 @@
       body: JSON.stringify(value),
     });
   let facts, metadataRequest, back, latest;
-  const watchers = new Set();
+  const dataReaders = new Set();
+  const requestReaders = new Set();
+  let refreshButton, freshness, staleTimer, checkedAt, refreshPending;
+  let freshnessText = "Snapshot pending";
   const remember = (data) => {
     latest = data;
     return data;
@@ -78,9 +81,91 @@
       return result;
     };
   }
-  const notify = () => {
-    for (const poll of watchers) void poll();
-  };
+  const readAll = (readers) => Promise.all([...readers].map((read) => read()));
+  const notify = () => void readAll(requestReaders);
+  function showFreshness(text) {
+    freshnessText = text;
+    if (freshness) freshness.textContent = text;
+  }
+  function checked() {
+    checkedAt = new Date();
+    clearTimeout(staleTimer);
+    showFreshness(
+      `Checked at ${checkedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`,
+    );
+    if (freshness) staleTimer = setTimeout(() => showFreshness("Stale snapshot"), 60_000);
+  }
+  function refresh() {
+    if (refreshPending) return refreshPending;
+    if (refreshButton) refreshButton.disabled = true;
+    refreshPending = Promise.resolve()
+      .then(async () => {
+        window.dispatchEvent(new Event("dopamine:refresh"));
+        const results = await Promise.all([readAll(dataReaders), readAll(requestReaders)]);
+        if (results.flat().every(Boolean)) checked();
+        else {
+          checkedAt = undefined;
+          clearTimeout(staleTimer);
+          showFreshness("Refresh failed");
+        }
+      })
+      .finally(() => {
+        refreshPending = undefined;
+        if (refreshButton) refreshButton.disabled = false;
+      });
+    return refreshPending;
+  }
+  function addRefreshControl() {
+    if (refreshButton) return;
+    if (!document.body) {
+      document.addEventListener("DOMContentLoaded", addRefreshControl, { once: true });
+      return;
+    }
+    const control = document.createElement("aside");
+    control.setAttribute("aria-label", "Dashboard snapshot");
+    control.style.padding = "0.5rem 1rem";
+    freshness = document.createElement("span");
+    freshness.setAttribute("role", "status");
+    freshness.textContent = freshnessText;
+    refreshButton = document.createElement("button");
+    refreshButton.type = "button";
+    refreshButton.textContent = "Refresh";
+    refreshButton.addEventListener("click", () => void refresh());
+    control.append(freshness, " ", refreshButton);
+    document.body.prepend(control);
+    if (checkedAt) checked();
+  }
+  function observe(readers, load, onError) {
+    let stopped = false;
+    let pending = Promise.resolve();
+    const active = () => !stopped;
+    const update = () => {
+      const result = pending.then(async () => {
+        if (stopped) return true;
+        try {
+          await load(active);
+          return true;
+        } catch (error) {
+          if (!stopped) onError(error);
+          return false;
+        }
+      });
+      pending = result.catch(() => {});
+      return result;
+    };
+    readers.add(update);
+    addRefreshControl();
+    void update().then((ok) => {
+      if (!stopped && !checkedAt && (readers === dataReaders || !dataReaders.size)) {
+        if (ok) checked();
+        else showFreshness("Refresh needed");
+      }
+    });
+    return () => {
+      stopped = true;
+      readers.delete(update);
+    };
+  }
   addEventListener("message", (event) => {
     if (
       facts &&
@@ -125,40 +210,29 @@
   });
   window.dopamine = {
     data: () => request("/data.json"),
+    refresh,
     subscribe(callback, onError = () => {}) {
-      let etag,
-        rev,
-        stopped = false,
-        timer;
-      const poll = async () => {
-        try {
+      let etag, rev;
+      return observe(
+        dataReaders,
+        async (active) => {
           const response = await fetch("/data.json", {
             headers: etag ? { "If-None-Match": etag } : {},
           });
-          if (response.ok || response.status === 304) {
-            if (!facts) void metadata().catch(() => {});
-          }
-          if (response.status !== 304) {
-            if (!response.ok) throw new Error(`Dashboard refresh failed (${response.status}).`);
-            const data = await response.json();
-            if (stopped) return;
-            if (data.rev !== rev) await callback(data);
-            // Clicks carry the revision the page rendered, so remember it only after rendering.
-            remember(data);
-            rev = data.rev;
-            etag = response.headers.get("ETag");
-          }
-        } catch (error) {
-          if (!stopped) onError(error);
-        } finally {
-          if (!stopped) timer = setTimeout(poll, 15000);
-        }
-      };
-      void poll();
-      return () => {
-        stopped = true;
-        clearTimeout(timer);
-      };
+          if ((response.ok || response.status === 304) && !facts) void metadata().catch(() => {});
+          if (response.status === 304) return;
+          if (!response.ok) throw new Error(`Dashboard refresh failed (${response.status}).`);
+          const data = await response.json();
+          if (!active()) return;
+          if (data.rev !== rev) await callback(data);
+          if (!active()) return;
+          // Clicks carry the revision the page rendered, so remember it only after rendering.
+          remember(data);
+          rev = data.rev;
+          etag = response.headers.get("ETag");
+        },
+        onError,
+      );
     },
     /**
      * Records a click on an action. The hub checks it against the data this page last loaded, so a
@@ -221,45 +295,21 @@
       notify();
       return result.request;
     },
-    /** Calls back with this dashboard's requests whenever they change. */
+    /** Calls back with changed request state on load, Refresh or an action. */
     watchRequests(callback, onError = () => {}) {
-      let last,
-        timer,
-        stopped = false;
-      const poll = async () => {
-        clearTimeout(timer);
-        let busy = false;
-        try {
+      let last;
+      return observe(
+        requestReaders,
+        async (active) => {
           const result = await window.dopamine.requests();
           const text = JSON.stringify(result);
-          busy = result.requests.some((entry) =>
-            [
-              "awaiting-confirmation",
-              "queued",
-              "sending",
-              "delivered",
-              "failed",
-              "claimed",
-              "unresolved",
-            ].includes(entry.state),
-          );
-          if (!stopped && text !== last) {
+          if (active() && text !== last) {
             await callback(result.requests);
             last = text;
           }
-        } catch (error) {
-          if (!stopped) onError(error);
-        } finally {
-          if (!stopped) timer = setTimeout(poll, busy ? 3000 : 15000);
-        }
-      };
-      watchers.add(poll);
-      void poll();
-      return () => {
-        stopped = true;
-        watchers.delete(poll);
-        clearTimeout(timer);
-      };
+        },
+        onError,
+      );
     },
     view: {
       get: () => request("/api/view"),

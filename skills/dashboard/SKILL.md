@@ -44,7 +44,7 @@ The CLI takes the caller's identity from validated harness environment variables
 
 Write ordinary HTML, JavaScript and assets yourself, or start from the starter page. The page must follow these rules:
 
-- **Refresh on data only.** Update the view when the data revision changes. Keep the page itself in place: no reload or full redraw for new data.
+- **Read data when the reader asks.** `dopamine.subscribe` and `dopamine.watchRequests` each read once when registered. The client adds a **Refresh** button and a label that marks the snapshot stale after a minute. Refresh reads both again. Request status is also read after the reader acts or confirms an action. To refresh from a control of your own, call `dopamine.refresh()` from the reader's click, never from a timer. Update the view when the data revision changes, and keep the page itself in place: no reload or full redraw for new data.
 - Keep disclosure keys (what is expanded or collapsed) stable across updates, and preserve scroll position.
 - On a fetch or render error, keep showing the last good state.
 - Save the reader's place through the hub's `/api/view`, not browser storage.
@@ -60,7 +60,7 @@ Write ordinary HTML, JavaScript and assets yourself, or start from the starter p
 
 ## Post as you work
 
-Run `dash post` after every report or decision, and before every wait, so the dashboard is current whenever the reader looks.
+Run `dash post` after every report or decision, and before every wait, so opening or refreshing the dashboard shows the latest data.
 
 Post contributed fields as plain text: the starter shows them exactly as written, with no Markdown rendering. For formatted material, upload the source document with `dash attach` and name it in the posted text.
 
