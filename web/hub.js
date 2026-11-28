@@ -345,7 +345,12 @@ function render() {
   window.scrollTo(window.scrollX, scroll);
 }
 
-async function refresh() {
+let refreshPending = Promise.resolve();
+function refresh() {
+  refreshPending = refreshPending.then(readIndex);
+  return refreshPending;
+}
+async function readIndex() {
   try {
     const now = Date.now();
     for (const image of document.querySelectorAll(".tile-image[data-retry-at]")) {
@@ -355,10 +360,12 @@ async function refresh() {
       url.searchParams.set("retry", String(Math.floor(now / iconRetryDelay)));
       image.src = url.href;
     }
-    const response = await fetch("/api/index");
+    const response = await fetch("/api/index", { signal: AbortSignal.timeout(15_000) });
     if (!response.ok)
       throw new Error("Couldn't refresh the dashboard list. Showing the last list that loaded.");
     const next = await response.json();
+    $("#checked").textContent =
+      `Checked at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
     const text = JSON.stringify(next);
     $("#error").hidden = true;
     if (signature === text) {
@@ -381,4 +388,12 @@ $("#clear").addEventListener("click", () => {
   update();
 });
 void refresh();
-setInterval(refresh, 15000);
+const refreshButton = $("#refresh");
+refreshButton.addEventListener("click", async () => {
+  refreshButton.disabled = true;
+  try {
+    await refresh();
+  } finally {
+    refreshButton.disabled = false;
+  }
+});

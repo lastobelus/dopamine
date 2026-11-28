@@ -330,16 +330,20 @@ function render(data) {
   dopamine.subscribe(render, showError);
   ready = true;
 })();
-/** Reads the manifest, retrying after a failure, then turns on action buttons and requests. */
+// The shared client emits this private event on Refresh.
+addEventListener("dopamine:refresh", () => {
+  if (!manifest) void loadMeta();
+});
+/** Reads the manifest, then turns on action buttons and requests. */
 async function loadMeta() {
   try {
     const meta = await dopamine.meta();
+    if (manifest) return;
     document.querySelector("#title").textContent = meta.manifest.title;
     document.title = meta.manifest.title;
     manifest = meta.manifest;
   } catch (error) {
     showError(error);
-    setTimeout(() => void loadMeta(), 5000);
     return;
   }
   if (!manifest.actions?.length) return;

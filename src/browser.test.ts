@@ -36,6 +36,7 @@ describe("hub list links", () => {
         },
         location: { search: "" },
         URLSearchParams,
+        AbortSignal,
         fetch: () => new Promise(() => {}),
         setInterval() {},
       },
@@ -92,6 +93,8 @@ describe("shell framing changes", () => {
     nodes["#dashboard"] = frame;
     const timers: (() => void)[] = [];
     const events: Record<string, (event: unknown) => void> = {};
+    const initial = Promise.withResolvers<void>();
+    let reads = 0;
     const location = { pathname: "/d/example--worker", search: "", hash: "" };
     let allowed = true,
       address = "http://example.localhost/#/reports";
@@ -103,7 +106,9 @@ describe("shell framing changes", () => {
             removeAttribute(name: string) {
               delete nodes[selector]![name];
             },
-            addEventListener() {},
+            addEventListener(name: string, callback: () => void) {
+              if (selector === "#refresh") events[name] = callback;
+            },
           }),
       },
       location,
@@ -116,11 +121,13 @@ describe("shell framing changes", () => {
       },
       URL,
       URLSearchParams,
+      AbortSignal,
       addEventListener: (name: string, callback: (event: unknown) => void) => {
         events[name] = callback;
       },
       setInterval: (callback: () => void) => timers.push(callback),
       async fetch() {
+        if (++reads === 1) await initial.promise;
         return {
           ok: true,
           json: async () => ({
@@ -133,6 +140,13 @@ describe("shell framing changes", () => {
       },
     });
     await setImmediate();
+    events.click!(undefined);
+    await setImmediate();
+    expect(reads).toBe(1);
+    initial.resolve();
+    await setImmediate();
+    expect(reads).toBe(2);
+    expect(timers).toHaveLength(0);
     expect(navigations).toHaveLength(1);
     expect(navigations[0]).toBe(address);
     expect(nodes["#direct"]!.href).toBe(address);
@@ -142,17 +156,17 @@ describe("shell framing changes", () => {
       data: { type: "dopamine:location", url: "http://example.localhost/" },
     });
     expect(nodes["#direct"]!.href).toBe("http://example.localhost/");
-    timers[0]!();
+    events.click!(undefined);
     await setImmediate();
     expect(navigations).toHaveLength(1);
     allowed = false;
-    timers[0]!();
+    events.click!(undefined);
     await setImmediate();
     expect(frame.hidden).toBe(true);
     expect(nodes["#blocked"]!.hidden).toBe(false);
     expect(nodes["#outside"]!.href).toBe("http://example.localhost/");
     allowed = true;
-    timers[0]!();
+    events.click!(undefined);
     await setImmediate();
     expect(frame.hidden).toBe(false);
     expect(nodes["#blocked"]!.hidden).toBe(true);
@@ -160,15 +174,15 @@ describe("shell framing changes", () => {
     location.search = "?dopamine-path=%2Fold&tab=previous";
     location.hash = "#old";
     address = "http://new-site.localhost/new?tab=current";
-    timers[0]!();
+    events.click!(undefined);
     await setImmediate();
     expect(navigations.at(-1)).toBe(address);
     expect(navigations).toHaveLength(3);
-    timers[0]!();
+    events.click!(undefined);
     await setImmediate();
     expect(navigations).toHaveLength(3);
     address = "http://new-site.localhost/reports?tab=reports";
-    timers[0]!();
+    events.click!(undefined);
     await setImmediate();
     expect(navigations.at(-1)).toBe(address);
     events.message!({
@@ -179,22 +193,29 @@ describe("shell framing changes", () => {
     expect(new URLSearchParams(location.search).get("dopamine-path")).toBe("/");
     expect(nodes["#direct"]!.href).toBe("http://new-site.localhost/");
     allowed = false;
-    timers[0]!();
+    events.click!(undefined);
     await setImmediate();
     allowed = true;
-    timers[0]!();
+    events.click!(undefined);
     await setImmediate();
     expect(navigations.at(-1)).toBe("http://new-site.localhost/");
   });
 });
 
 describe("page subscription", () => {
-  it("retries a revision after a failed render instead of accepting its ETag", async () => {
+  it("reads on Refresh without polling or accepting a failed render's ETag", async () => {
     const timers: (() => Promise<void>)[] = [];
     const headers: unknown[] = [];
     const view: {
-      dopamine?: { subscribe: (callback: () => void, error: () => void) => () => void };
-    } = {};
+      dopamine?: {
+        subscribe: (callback: () => void, error: () => void) => () => void;
+        watchRequests: (callback: () => void, error: () => void) => () => void;
+      };
+      dispatchEvent: () => void;
+    } = { dispatchEvent() {} };
+    let click!: () => void;
+    const status = { textContent: "", setAttribute() {} };
+    let now = Date.now();
     const location = { href: "http://example--workstation.hub.localhost/", search: "" };
     await runInNewContext(await readFile(new URL("../web/dopamine.js", import.meta.url), "utf8"), {
       window: view,
@@ -202,9 +223,30 @@ describe("page subscription", () => {
       location,
       URL,
       URLSearchParams,
+      AbortSignal,
+      Date: class extends Date {
+        static override now() {
+          return now;
+        }
+      },
       history: { pushState() {}, replaceState() {} },
       addEventListener() {},
-      document: { addEventListener() {} },
+      Event,
+      document: {
+        addEventListener() {},
+        body: { prepend() {} },
+        createElement(tag: string) {
+          if (tag === "span") return status;
+          return {
+            style: {},
+            setAttribute() {},
+            append() {},
+            addEventListener(_event: string, callback: () => void) {
+              click = callback;
+            },
+          };
+        },
+      },
       setTimeout(callback: () => Promise<void>) {
         timers.push(callback);
         return timers.length;
@@ -216,6 +258,7 @@ describe("page subscription", () => {
             ok: true,
             json: async () => ({ shell: "http://hub.localhost/d/example--workstation" }),
           };
+        if (path === "/api/actions") return { ok: true, json: async () => ({ requests: [] }) };
         headers.push(options?.headers);
         return {
           ok: true,
@@ -239,12 +282,29 @@ describe("page subscription", () => {
     await setImmediate();
     expect(errors).toBe(1);
     expect(calls).toBe(1);
-    await timers.shift()!();
+    expect(timers).toHaveLength(0);
+    expect(status.textContent).toBe("Refresh needed");
+    click();
+    await setImmediate();
     expect(calls).toBe(2);
     expect(headers[1]).toEqual({});
+    expect(status.textContent).toMatch(/^Checked at /);
+    expect(timers).toHaveLength(1);
+    now += 60_000;
     await timers.shift()!();
+    expect(status.textContent).toBe("Stale snapshot");
+    expect(headers).toHaveLength(2);
+    click();
+    await setImmediate();
     expect(headers[2]).toEqual({ "If-None-Match": '"2"' });
     expect(calls).toBe(2);
+    now += 60_000;
+    view.dopamine!.watchRequests(
+      () => {},
+      () => {},
+    );
+    await setImmediate();
+    expect(status.textContent).toBe("Stale snapshot");
     unsubscribe();
   });
 });
@@ -272,6 +332,7 @@ describe("page metadata recovery", () => {
       location,
       URL,
       URLSearchParams,
+      AbortSignal,
       history: { pushState() {}, replaceState() {} },
       addEventListener() {},
       document: {
@@ -390,6 +451,7 @@ async function shell(search = "") {
     },
     URL,
     URLSearchParams,
+    AbortSignal,
     Intl,
     addEventListener: (name: string, callback: (event: unknown) => void) => {
       events[name] = callback;
@@ -504,6 +566,7 @@ describe("page actions", () => {
       location: { href: "http://example--workstation.hub.localhost/", search: "", pathname: "/" },
       URL,
       URLSearchParams,
+      AbortSignal,
       crypto,
       history: { pushState() {}, replaceState() {} },
       addEventListener() {},
@@ -533,8 +596,10 @@ describe("page actions", () => {
       dopamine?: {
         subscribe: (callback: (data: { rev: number }) => void, error: () => void) => void;
         act: (...args: unknown[]) => Promise<unknown>;
+        refresh: () => Promise<void>;
       };
-    } = {};
+      dispatchEvent: () => void;
+    } = { dispatchEvent() {} };
     const timers: (() => Promise<void>)[] = [];
     const posts: string[] = [];
     let rev = 1;
@@ -544,7 +609,9 @@ describe("page actions", () => {
       location: { href: "http://example--workstation.hub.localhost/", search: "", pathname: "/" },
       URL,
       URLSearchParams,
+      AbortSignal,
       crypto,
+      Event,
       history: { pushState() {}, replaceState() {} },
       addEventListener() {},
       document: { addEventListener() {} },
@@ -560,7 +627,11 @@ describe("page actions", () => {
           return { ok: true, status: 202, json: async () => ({ request: { state: "queued" } }) };
         }
         if (path === "/api/actions")
-          return { ok: true, status: 200, json: async () => ({ requests: [] }) };
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ requests: [{ state: "failed" }, { state: "unresolved" }] }),
+          };
         const items = { k: { rev } };
         return {
           ok: true,
@@ -578,12 +649,12 @@ describe("page actions", () => {
     );
     await setImmediate();
     rev = 2;
-    await timers.shift()!();
+    await view.dopamine!.refresh();
     // Data fetched but not rendered does not change what a click carries either.
     await (view.dopamine as unknown as { data: () => Promise<unknown> }).data();
     await view.dopamine!.act("decide", { collection: "c", key: "k" });
     expect(JSON.parse(posts[0]!).target.itemRev).toBe(1);
-    // A request list that failed to draw is drawn again on the next poll.
+    // A request list that failed to draw is drawn again on the next Refresh.
     let draws = 0;
     (
       view.dopamine as unknown as {
@@ -597,7 +668,8 @@ describe("page actions", () => {
       () => {},
     );
     await setImmediate();
-    await timers.at(-1)!();
+    expect(timers).toHaveLength(0);
+    await view.dopamine!.refresh();
     expect(draws).toBe(2);
   });
 });

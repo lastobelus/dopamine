@@ -21,14 +21,23 @@ function updateDirect() {
   document.querySelector("#direct").href = direct.href;
   document.querySelector("#outside").href = direct.href;
 }
-async function refresh() {
+let refreshPending = Promise.resolve();
+function refresh() {
+  refreshPending = refreshPending.then(readStatus);
+  return refreshPending;
+}
+async function readStatus() {
   try {
-    const response = await fetch(`/api/shell/${encodeURIComponent(key)}`);
+    const response = await fetch(`/api/shell/${encodeURIComponent(key)}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
     if (!response.ok)
       throw new Error(
         "Can't reach this dashboard right now. Anything shown below may be out of date.",
       );
     dashboard = await response.json();
+    document.querySelector("#checked").textContent =
+      `Checked at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
     document.title = `${dashboard.manifest.title} · dopamine`;
     document.querySelector("#title").textContent =
       `${dashboard.manifest.title} · ${dashboard.manifest.machine}`;
@@ -200,4 +209,12 @@ void refresh().then(() => {
   );
   void showConfirmation(pending);
 });
-setInterval(() => void refresh(), 15000);
+const refreshButton = document.querySelector("#refresh");
+refreshButton.addEventListener("click", async () => {
+  refreshButton.disabled = true;
+  try {
+    await refresh();
+  } finally {
+    refreshButton.disabled = false;
+  }
+});

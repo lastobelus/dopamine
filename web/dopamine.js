@@ -1,7 +1,9 @@
 /* eslint-disable unicorn/consistent-function-scoping -- Keep the public client isolated from page globals. */
 (() => {
+  const fetchWithDeadline = (path, options) =>
+    fetch(path, { ...options, signal: AbortSignal.timeout(15_000) });
   const request = async (path, options) => {
-    const response = await fetch(path, options);
+    const response = options ? await fetch(path, options) : await fetchWithDeadline(path);
     if (!response.ok) {
       let details = {};
       try {
@@ -23,7 +25,9 @@
       body: JSON.stringify(value),
     });
   let facts, metadataRequest, back, latest;
-  const watchers = new Set();
+  const dataReaders = new Map();
+  const requestReaders = new Map();
+  let refreshButton, freshness, staleTimer, refreshPending;
   const remember = (data) => {
     latest = data;
     return data;
@@ -78,9 +82,94 @@
       return result;
     };
   }
-  const notify = () => {
-    for (const poll of watchers) void poll();
-  };
+  const readAll = (readers) => Promise.all([...readers.keys()].map((read) => read()));
+  const notify = () => void readAll(requestReaders);
+  function reportReadState() {
+    if (!freshness) return;
+    clearTimeout(staleTimer);
+    const outcomes = [...dataReaders.values(), ...requestReaders.values()];
+    if (outcomes.includes(false)) {
+      freshness.textContent = "Refresh needed";
+      return;
+    }
+    if (!outcomes.length || outcomes.includes(undefined)) {
+      freshness.textContent = "Snapshot pending";
+      return;
+    }
+    const at = Math.min(...outcomes);
+    const remaining = 60_000 - (Date.now() - at);
+    if (remaining <= 0) {
+      freshness.textContent = "Stale snapshot";
+      return;
+    }
+    freshness.textContent = `Checked at ${new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+    staleTimer = setTimeout(reportReadState, remaining);
+  }
+  function refresh() {
+    if (refreshPending) return refreshPending;
+    if (refreshButton) refreshButton.disabled = true;
+    refreshPending = Promise.resolve()
+      .then(async () => {
+        window.dispatchEvent(new Event("dopamine:refresh"));
+        await Promise.all([readAll(dataReaders), readAll(requestReaders)]);
+      })
+      .finally(() => {
+        refreshPending = undefined;
+        if (refreshButton) refreshButton.disabled = false;
+      });
+    return refreshPending;
+  }
+  function addRefreshControl() {
+    if (refreshButton) return;
+    if (!document.body) {
+      document.addEventListener("DOMContentLoaded", addRefreshControl, { once: true });
+      return;
+    }
+    const control = document.createElement("aside");
+    control.setAttribute("aria-label", "Dashboard snapshot");
+    control.style.padding = "0.5rem 1rem";
+    freshness = document.createElement("span");
+    freshness.setAttribute("role", "status");
+    refreshButton = document.createElement("button");
+    refreshButton.type = "button";
+    refreshButton.textContent = "Refresh";
+    refreshButton.addEventListener("click", () => void refresh());
+    control.append(freshness, " ", refreshButton);
+    document.body.prepend(control);
+    reportReadState();
+  }
+  function observe(readers, load, onError) {
+    let stopped = false;
+    let pending = Promise.resolve();
+    const active = () => !stopped;
+    const update = () => {
+      const result = pending.then(async () => {
+        if (stopped) return;
+        try {
+          await load(active);
+          if (!stopped) readers.set(update, Date.now());
+        } catch (error) {
+          if (!stopped) {
+            readers.set(update, false);
+            onError(error);
+          }
+        } finally {
+          if (!stopped) reportReadState();
+        }
+      });
+      pending = result.catch(() => {});
+      return result;
+    };
+    readers.set(update, undefined);
+    reportReadState();
+    addRefreshControl();
+    void update();
+    return () => {
+      stopped = true;
+      readers.delete(update);
+      reportReadState();
+    };
+  }
   addEventListener("message", (event) => {
     if (
       facts &&
@@ -125,40 +214,29 @@
   });
   window.dopamine = {
     data: () => request("/data.json"),
+    refresh,
     subscribe(callback, onError = () => {}) {
-      let etag,
-        rev,
-        stopped = false,
-        timer;
-      const poll = async () => {
-        try {
-          const response = await fetch("/data.json", {
+      let etag, rev;
+      return observe(
+        dataReaders,
+        async (active) => {
+          const response = await fetchWithDeadline("/data.json", {
             headers: etag ? { "If-None-Match": etag } : {},
           });
-          if (response.ok || response.status === 304) {
-            if (!facts) void metadata().catch(() => {});
-          }
-          if (response.status !== 304) {
-            if (!response.ok) throw new Error(`Dashboard refresh failed (${response.status}).`);
-            const data = await response.json();
-            if (stopped) return;
-            if (data.rev !== rev) await callback(data);
-            // Clicks carry the revision the page rendered, so remember it only after rendering.
-            remember(data);
-            rev = data.rev;
-            etag = response.headers.get("ETag");
-          }
-        } catch (error) {
-          if (!stopped) onError(error);
-        } finally {
-          if (!stopped) timer = setTimeout(poll, 15000);
-        }
-      };
-      void poll();
-      return () => {
-        stopped = true;
-        clearTimeout(timer);
-      };
+          if ((response.ok || response.status === 304) && !facts) void metadata().catch(() => {});
+          if (response.status === 304) return;
+          if (!response.ok) throw new Error(`Dashboard refresh failed (${response.status}).`);
+          const data = await response.json();
+          if (!active()) return;
+          if (data.rev !== rev) await callback(data);
+          if (!active()) return;
+          // Clicks carry the revision the page rendered, so remember it only after rendering.
+          remember(data);
+          rev = data.rev;
+          etag = response.headers.get("ETag");
+        },
+        onError,
+      );
     },
     /**
      * Records a click on an action. The hub checks it against the data this page last loaded, so a
@@ -221,45 +299,21 @@
       notify();
       return result.request;
     },
-    /** Calls back with this dashboard's requests whenever they change. */
+    /** Calls back with changed request state on load, Refresh or an action. */
     watchRequests(callback, onError = () => {}) {
-      let last,
-        timer,
-        stopped = false;
-      const poll = async () => {
-        clearTimeout(timer);
-        let busy = false;
-        try {
+      let last;
+      return observe(
+        requestReaders,
+        async (active) => {
           const result = await window.dopamine.requests();
           const text = JSON.stringify(result);
-          busy = result.requests.some((entry) =>
-            [
-              "awaiting-confirmation",
-              "queued",
-              "sending",
-              "delivered",
-              "failed",
-              "claimed",
-              "unresolved",
-            ].includes(entry.state),
-          );
-          if (!stopped && text !== last) {
+          if (active() && text !== last) {
             await callback(result.requests);
             last = text;
           }
-        } catch (error) {
-          if (!stopped) onError(error);
-        } finally {
-          if (!stopped) timer = setTimeout(poll, busy ? 3000 : 15000);
-        }
-      };
-      watchers.add(poll);
-      void poll();
-      return () => {
-        stopped = true;
-        watchers.delete(poll);
-        clearTimeout(timer);
-      };
+        },
+        onError,
+      );
     },
     view: {
       get: () => request("/api/view"),

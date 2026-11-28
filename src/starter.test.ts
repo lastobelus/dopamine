@@ -62,6 +62,7 @@ async function page(
   );
   new Element("main").append(nodes.collections!);
   let render: ((data: unknown) => void) | undefined;
+  const events: Record<string, () => void> = {};
   runInNewContext(await readFile(new URL("../starter/app.js", import.meta.url), "utf8"), {
     document: {
       querySelector: (selector: string) => nodes[selector.slice(1)],
@@ -73,7 +74,9 @@ async function page(
     },
     window: { scrollY: 0, scrollX: 0, scrollTo() {} },
     requestAnimationFrame: (callback: () => void) => callback(),
-    addEventListener() {},
+    addEventListener: (event: string, callback: () => void) => {
+      events[event] = callback;
+    },
     location: { href: "http://example--workstation.hub.localhost/" },
     URL,
     Intl,
@@ -90,7 +93,7 @@ async function page(
   });
   await setImmediate();
   if (!render) throw new Error("Starter did not subscribe");
-  return { render, root: nodes.collections! };
+  return { render, root: nodes.collections!, events };
 }
 const request = (requestId: string, state: string) => ({
   requestId,
@@ -274,7 +277,7 @@ describe("starter rendering", () => {
   it("adds action buttons once metadata loads after a failure", async () => {
     const timers: (() => void)[] = [];
     let fail = true;
-    const { render, root } = await page(
+    const { render, root, events } = await page(
       {
         meta: async () => {
           if (fail) throw new Error("Dashboard request failed (503).");
@@ -299,7 +302,8 @@ describe("starter rendering", () => {
       root.all().filter((node) => node.tag === "button" && node.textContent === "Go");
     expect(buttons()).toHaveLength(0);
     fail = false;
-    timers.shift()!();
+    expect(timers).toHaveLength(0);
+    events["dopamine:refresh"]!();
     await setImmediate();
     expect(buttons()).toHaveLength(1);
   });

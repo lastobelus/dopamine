@@ -46,6 +46,8 @@ dash url example
 
 For a custom page, put `index.html` and its assets in a folder, then run `dash publish example ./page`. Vendor libraries with the page; the page policy blocks runtime CDN requests. The supplied client, `/dopamine.js`, exposes `dopamine.data()`, `dopamine.subscribe(callback, onError)`, `dopamine.view.get()` / `dopamine.view.set(value)`, and for actions `dopamine.act()`, `dopamine.watchRequests()` and `dopamine.choose()`. A page may also use plain HTTP.
 
+Pages that subscribe to data or request status get a **Refresh** button from the client. Subscriptions read on load and on Refresh, and request status also updates after a reader action. Pages may call `dopamine.refresh()` from their own Refresh control.
+
 The optional [starter](starter/) shows questions, lists, work streams, metrics and citations. It preserves disclosures and scroll across data changes and saves the reader's place on the hub. Follow the same rules in custom pages. The [dashboard skill](skills/dashboard/SKILL.md) describes when and how agents should use the tool.
 
 Use `dash attach example ./note.txt` for supporting files. Attachments are served as sandboxed text. `dash remove example` retains a recoverable copy for seven days; `dash restore example` restores the newest copy if its ID has not been reused. Dashboards may outlive their owner threads.

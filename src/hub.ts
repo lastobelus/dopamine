@@ -145,11 +145,12 @@ function call(
   headers: Record<string, string> = {},
   bytes?: Buffer,
   timeout = 5000,
+  signal?: AbortSignal,
 ): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(
       url,
-      { method, headers },
+      { method, headers, signal },
       (res) => {
         const chunks: Buffer[] = [];
         let size = 0;
@@ -367,13 +368,14 @@ export async function startHub(
       throw new HttpError(503, "Peer is unreachable");
     }
   }
-  async function probeUrl(address: string): Promise<{ status: string; frameAllowed: boolean }> {
+  async function readUrlProbe(address: string): Promise<{ status: string; frameAllowed: boolean }> {
     const registered = new URL(address);
+    const signal = AbortSignal.timeout(1000);
     try {
       const request = (target: URL) => {
         const probe = new URL(target);
         probe.hostname = "127.0.0.1";
-        return call(probe, "GET", { host: registered.host }, undefined, 1000);
+        return call(probe, "GET", { host: registered.host }, undefined, 1000, signal);
       };
       let target = registered;
       let result = await request(target);
@@ -395,6 +397,25 @@ export async function startHub(
     } catch {
       return { status: "unreachable", frameAllowed: true };
     }
+  }
+  const urlProbes = new Map<
+    string,
+    { result: ReturnType<typeof readUrlProbe>; expiresAt: number }
+  >();
+  function probeUrl(address: string) {
+    const key = new URL(address).href;
+    const time = now();
+    const previous = urlProbes.get(key);
+    if (previous && previous.expiresAt > time) return previous.result;
+    for (const [url, entry] of urlProbes) {
+      if (entry.expiresAt <= time) urlProbes.delete(url);
+    }
+    const entry = { result: readUrlProbe(key), expiresAt: Infinity };
+    urlProbes.set(key, entry);
+    void entry.result.then(({ status }) => {
+      entry.expiresAt = now() + (status === "reachable" ? 30_000 : 5_000);
+    });
+    return entry.result;
   }
   async function summary(record: DashboardRecord): Promise<Summary> {
     const key = `${record.manifest.id}--${record.manifest.machine}`;
